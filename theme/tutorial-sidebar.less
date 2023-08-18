@@ -514,12 +514,14 @@
 
 #root.headless.tabTutorial {
     #simulator .editor-sidebar {
-        position: relative;
-        display: block !important;
         width: @simulatorWidth;
         height: calc(~'100%' - @mainMenuHeight);
         top: @mainMenuHeight;
         left: 0;
+
+        .simPanel {
+            display: none;
+        }
     }
 
     #boardview, .filemenu {
@@ -658,6 +660,7 @@
         }
 
         #simulator .editor-sidebar {
+            display: block !important;
             height: @defaultTutorialHeight;
             width: 100%;
         }
@@ -1113,15 +1116,6 @@
     #root.headless.tabTutorial.collapsedEditorTools {
         .tutorial-hint .tutorial-callout-button.ui.button {
             margin: 0;
-        }
-
-        .tutorial-controls {
-            position: absolute;
-            right: 5.5rem;
-            height: 100%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
         }
     }
     .tutorial-title {
