@@ -516,16 +516,19 @@ const stripMonacoSourceMaps = () => {
     return Promise.resolve();
 }
 
-const copyMonaco = gulp.series(gulp.parallel(
-    copyMonacoBase,
-    copyMonacoEditor,
-    copyMonacoLoader,
-    copyMonacoEditorMain,
-    copyMonacoJSON,
-    copyMonacoBasicLanguages,
-    copyMonacoTypescript,
-    inlineCodiconFont
-), stripMonacoSourceMaps);
+const copyMonaco = gulp.series(
+    gulp.parallel(
+        copyMonacoBase,
+        copyMonacoEditor,
+        copyMonacoLoader,
+        copyMonacoEditorMain,
+        copyMonacoJSON,
+        copyMonacoBasicLanguages,
+        copyMonacoTypescript,
+    ),
+    inlineCodiconFont,
+    stripMonacoSourceMaps
+);
 
 
 
@@ -596,7 +599,7 @@ const runSkillmapTests = () => {
     if(isWin32) {
         command = path.resolve("node_modules/.bin/mocha.cmd") + " ./built/tests/tests/skillmapParserTests.js";
     } else {
-        command = "./node_modules/.bin/mocha ./built/tests/tests/skillmapParserTests.js"; 
+        command = "./node_modules/.bin/mocha ./built/tests/tests/skillmapParserTests.js";
     }
     return exec(command, true);
 }
@@ -688,7 +691,7 @@ const kiosk = gulp.series(cleanKiosk, buildKiosk, gulp.series(copyKioskCss, copy
                  Webapp build wrappers
 *********************************************************/
 
-const shouldBuildWebapps = () => (process.argv.indexOf("--no-webapps") === -1);
+const shouldBuildWebapps = () => (process.argv.indexOf("--no-webapps") === -1 && process.argv.indexOf("-n") === -1);
 
 const maybeUpdateWebappStrings = () => {
     if (!shouldBuildWebapps()) return noop;
@@ -712,7 +715,7 @@ const maybeBuildWebapps = () => {
 const lintWithEslint = () => Promise.all(
     ["cli", "pxtblocks", "pxteditor", "pxtlib", "pxtcompiler",
         "pxtpy", "pxtrunner", "pxtsim", "webapp",
-        "docfiles/pxtweb", "skillmap", "authcode", "multiplayer", "docs/static/streamer"].map(dirname =>
+        "docfiles/pxtweb", "skillmap", "authcode", "multiplayer"/*, "kiosk"*/, "docs/static/streamer"].map(dirname =>
             exec(`node node_modules/eslint/bin/eslint.js -c .eslintrc.js --ext .ts,.tsx ./${dirname}/`, true)))
     .then(() => console.log("linted"))
 const lint = lintWithEslint
@@ -727,6 +730,7 @@ const testpycomp = testTask("pyconverter-test", "pyconvertrunner.js");
 const testpytraces = testTask("runtime-trace-tests", "tracerunner.js");
 const testtutorials = testTask("tutorial-test", "tutorialrunner.js");
 const testlanguageservice = testTask("language-service", "languageservicerunner.js");
+const testpxteditor = testTask("pxt-editor-test", "editorrunner.js", ["built/pxteditor.js"]);
 
 const buildKarmaRunner = () => compileTsProject("tests/blocklycompiler-test", "built/tests/", true);
 const runKarma = () => {
@@ -757,20 +761,28 @@ const testAll = gulp.series(
     testtutorials,
     testlanguageservice,
     karma,
-    testSkillmap
+    testSkillmap,
+    testpxteditor
 )
 
-function testTask(testFolder, testFile) {
+function testTask(testFolder, testFile, additionalFiles) {
     const buildTs = () => compileTsProject("tests/" + testFolder, "built/tests", true);
 
-    const buildTestRunner = () => gulp.src([
+    const src = [
         "pxtcompiler/ext-typescript/lib/typescript.js",
         "built/pxtlib.js",
         "built/pxtcompiler.js",
         "built/pxtpy.js",
         "built/pxtsim.js",
-        "built/tests/" + testFolder + "/" + testFile,
-    ])
+    ]
+
+    if (additionalFiles) {
+        src.push(...additionalFiles);
+    }
+
+    src.push("built/tests/" + testFolder + "/" + testFile,)
+
+    const buildTestRunner = () => gulp.src(src)
         .pipe(concat("runner.js"))
         .pipe(header(`
             "use strict";
@@ -853,6 +865,7 @@ exports.multiplayer = multiplayer;
 exports.kiosk = kiosk;
 exports.icons = buildSVGIcons;
 exports.testhelpers = testhelpers;
+exports.testpxteditor = testpxteditor;
 exports.cli = gulp.series(
     gulp.parallel(pxtlib, pxtweb),
     gulp.parallel(pxtcompiler, pxtsim, backendutils),

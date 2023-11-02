@@ -116,6 +116,15 @@ namespace pxt.Cloud {
         })
     }
 
+    export function downloadScriptMetaAsync(id: string): Promise<JsonScriptMeta> {
+        return privateRequestAsync({
+            url: id + (id.startsWith("S") ? `?time=${Date.now()}` : ""),
+            forceLiveEndpoint: true,
+        }).then(resp => {
+            return JSON.parse(resp.text).meta;
+        })
+    }
+
     export async function markdownAsync(docid: string, locale?: string, propagateExceptions?: boolean): Promise<string> {
         // 1h check on markdown content if not on development server
         const MARKDOWN_EXPIRATION = pxt.BrowserUtils.isLocalHostDev() ? 0 : 1 * 60 * 60 * 1000;
@@ -284,5 +293,6 @@ namespace pxt.Cloud {
         targetVersion?: string;
         meta?: JsonScriptMeta; // only in lite, bag of metadata
         thumb?: boolean;
+        persistId?: string;
     }
 }

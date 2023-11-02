@@ -14,8 +14,11 @@ import * as compiler from "./compiler"
 import * as auth from "./auth"
 import * as cloud from "./cloud"
 
+import * as dmp from "diff-match-patch";
+
 import U = pxt.Util;
 import Cloud = pxt.Cloud;
+
 
 // Avoid importing entire crypto-js
 /* eslint-disable import/no-internal-modules */
@@ -278,24 +281,72 @@ export function initAsync() {
         })
 }
 
-export function getTextAsync(id: string): Promise<ScriptText> {
-    return maybeSyncHeadersAsync()
-        .then(() => {
-            let e = lookup(id)
-            if (!e)
-                return Promise.resolve(null as ScriptText)
-            if (e.text)
-                return Promise.resolve(e.text)
-            return headerQ.enqueue(id, () => impl.getAsync(e.header)
-                .then(resp => {
-                    if (!e.text) {
-                        // otherwise we were beaten to it
-                        e.text = fixupFileNames(resp.text);
-                    }
-                    e.version = resp.version;
-                    return e.text
-                }))
-        })
+export async function getTextAsync(id: string, getSavedText = false): Promise<ScriptText> {
+    await maybeSyncHeadersAsync();
+
+    const e = lookup(id);
+    if (!e) return null;
+
+    if (e.text && !getSavedText) {
+        return e.text;
+    }
+
+    return headerQ.enqueue(id, async () => {
+        const resp = await impl.getAsync(e.header);
+        const fixedText = fixupFileNames(resp.text);
+
+        if (getSavedText) {
+            return fixedText;
+        }
+        else if (!e.text) {
+            e.text = fixedText;
+        }
+        e.version = resp.version;
+        return e.text
+    });
+}
+
+export async function saveSnapshotAsync(id: string): Promise<void> {
+    await enqueueHistoryOperationAsync(
+        id,
+        text => {
+            pxt.workspace.pushSnapshotOnHistory(text, Date.now())
+        }
+    );
+}
+
+export async function updateShareHistoryAsync(id: string): Promise<void> {
+    await enqueueHistoryOperationAsync(
+        id,
+        (text, header) => {
+            pxt.workspace.updateShareHistory(text, Date.now(), header.pubVersions || [])
+        }
+    );
+}
+
+async function enqueueHistoryOperationAsync(id: string, op: (text: ScriptText, header: Header) => void) {
+    await maybeSyncHeadersAsync();
+
+    const e = lookup(id);
+
+    if (!e) return;
+
+    await headerQ.enqueue(id, async () => {
+        const saved = await impl.getAsync(e.header);
+
+        const h = saved.header;
+
+        op(saved.text, h);
+
+        const ver = await impl.setAsync(h, saved.version, saved.text);
+        e.version = ver;
+
+        data.invalidate("text:" + h.id);
+        data.invalidate("pkg-git-status:" + h.id);
+        data.invalidateHeader("header", h);
+
+        refreshHeadersSession();
+    });
 }
 
 export interface ScriptMeta {
@@ -335,46 +386,48 @@ function getScriptRequest(h: Header, text: ScriptText, meta: ScriptMeta, screens
 }
 
 // https://github.com/Microsoft/pxt-backend/blob/master/docs/sharing.md#anonymous-publishing
-export function anonymousPublishAsync(h: Header, text: ScriptText, meta: ScriptMeta, screenshotUri?: string) {
+export async function anonymousPublishAsync(h: Header, text: ScriptText, meta: ScriptMeta, screenshotUri?: string) {
     checkHeaderSession(h);
 
     const saveId = {}
     h.saveId = saveId
     const scrReq = getScriptRequest(h, text, meta, screenshotUri)
+
     pxt.debug(`publishing script; ${scrReq.text.length} bytes`)
-    return Cloud.privatePostAsync("scripts", scrReq, /* forceLiveEndpoint */ true)
-        .then((inf: Cloud.JsonScript) => {
-            if (!h.pubVersions) h.pubVersions = [];
-            h.pubVersions.push({ id: inf.id, type: "snapshot" });
-            if (inf.shortid) inf.id = inf.shortid;
-            h.pubId = inf.shortid
-            h.pubCurrent = h.saveId === saveId
-            h.meta = inf.meta;
-            pxt.debug(`published; id /${h.pubId}`)
-            return saveAsync(h)
-                .then(() => inf)
-        })
+    const inf = await Cloud.privatePostAsync("scripts", scrReq, /* forceLiveEndpoint */ true) as Cloud.JsonScript;
+    if (!h.pubVersions) h.pubVersions = [];
+    h.pubVersions.push({ id: inf.id, type: "snapshot" });
+    if (inf.shortid) inf.id = inf.shortid;
+    h.pubId = inf.shortid
+    h.pubCurrent = h.saveId === saveId
+    h.meta = inf.meta;
+    pxt.debug(`published; id /${h.pubId}`)
+
+    await saveAsync(h);
+    await updateShareHistoryAsync(h.id);
+    return inf;
 }
 
-export function persistentPublishAsync(h: Header, text: ScriptText, meta: ScriptMeta, screenshotUri?: string) {
+export async function persistentPublishAsync(h: Header, text: ScriptText, meta: ScriptMeta, screenshotUri?: string) {
     checkHeaderSession(h);
 
     const saveId = {}
     h.saveId = saveId
     const scrReq = getScriptRequest(h, text, meta, screenshotUri)
     pxt.debug(`publishing script; ${scrReq.text.length} bytes`)
-    return cloud.shareAsync(h.id, scrReq)
-        .then((resp: { shareID: string, scr: cloud.SharedCloudProject }) => {
-            const { shareID, scr: script } = resp;
-            if (!h.pubVersions) h.pubVersions = [];
-            h.pubVersions.push({ id: script.id, type: "permalink" });
-            h.pubId = shareID
-            h.pubCurrent = h.saveId === saveId
-            h.pubPermalink = shareID;
-            h.meta = script.meta;
-            pxt.debug(`published; id /${h.pubId}`)
-            return saveAsync(h).then(() => h)
-        })
+
+    const { shareID, scr: script } =  await cloud.shareAsync(h.id, scrReq);
+    if (!h.pubVersions) h.pubVersions = [];
+    h.pubVersions.push({ id: script.id, type: "permalink" });
+    h.pubId = shareID
+    h.pubCurrent = h.saveId === saveId
+    h.pubPermalink = shareID;
+    h.meta = script.meta;
+    pxt.debug(`published; id /${h.pubId}`)
+    await saveAsync(h);
+    await updateShareHistoryAsync(h.id);
+
+    return h;
 }
 
 function fixupVersionAsync(e: File) {
@@ -575,7 +628,30 @@ export async function saveAsync(h: Header, text?: ScriptText, fromCloudSync?: bo
         await fixupVersionAsync(e);
         let ver: any;
 
-        const toWrite = text ? e.text : null;
+        let toWrite = text ? e.text : null;
+
+        if (pxt.appTarget.appTheme.timeMachine) {
+            try {
+                const previous = await impl.getAsync(h);
+
+                if (previous) {
+                    if (!toWrite && previous.header.pubVersions?.length !== h.pubVersions?.length) {
+                        toWrite = { ...previous.text };
+                    }
+
+                    if (toWrite) {
+                        pxt.workspace.updateHistory(previous.text, toWrite, Date.now(), h.pubVersions || [], diffText, patchText);
+                    }
+                }
+            }
+            catch (e) {
+                // If this fails for some reason, the history is going to end
+                // up being corrupted. Should we switch to memory db?
+                pxt.reportException(e);
+                console.warn("Unable to update project history", e);
+            }
+        }
+
 
         try {
             ver = await impl.setAsync(h, e.version, toWrite);
@@ -626,6 +702,19 @@ function computePath(h: Header) {
 
     return path
 }
+const differ = new dmp.diff_match_patch();
+
+function diffText(a: string, b: string) {
+    return differ.patch_make(a, b);
+}
+
+function patchText(patch: unknown, a: string) {
+    return differ.patch_apply(patch as any, a)[0]
+}
+
+export function applyDiff(text: ScriptText, history: pxt.workspace.HistoryEntry) {
+    return pxt.workspace.applyDiff(text, history, patchText);
+}
 
 export function importAsync(h: Header, text: ScriptText, isCloud = false) {
     h.path = computePath(h)
@@ -651,8 +740,8 @@ export function installAsync(h0: InstallHeader, text: ScriptText, dontOverwriteI
         .then(() => h);
 }
 
-export async function duplicateAsync(h: Header, newName?: string): Promise<Header> {
-    const text = await getTextAsync(h.id);
+export async function duplicateAsync(h: Header, newName?: string, newText?: ScriptText): Promise<Header> {
+    const text = newText || (await getTextAsync(h.id));
 
     if (!newName)
         newName = createDuplicateName(h);
@@ -1682,8 +1771,13 @@ data.mountVirtualApi("headers", {
         return compiler.projectSearchAsync({ term: p, headers })
             .then((searchResults: pxtc.service.ProjectSearchInfo[]) => searchResults)
             .then(searchResults => {
-                let searchResultsMap = U.toDictionary(searchResults || [], h => h.id)
-                return headers.filter(h => searchResultsMap[h.id]);
+                const result: Header[] = [];
+
+                for (const header of searchResults) {
+                    result.push(headers.find(h => h.id === header.id));
+                }
+
+                return result.filter(h => !!h);
             });
     },
     expirationTime: p => 5 * 1000,
