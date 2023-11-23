@@ -149,7 +149,7 @@ namespace pxt.BrowserUtils {
     export function isLocalHost(ignoreFlags?: boolean): boolean {
         try {
             return typeof window !== "undefined"
-                && /^http:\/\/(localhost|127\.0\.0\.1):\d+\//.test(window.location.href)
+                && /^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+):\d+\//.test(window.location.href)
                 && (ignoreFlags || !/nolocalhost=1/.test(window.location.href))
                 && !(pxt?.webConfig?.isStatic);
         } catch (e) { return false; }
@@ -166,11 +166,11 @@ namespace pxt.BrowserUtils {
     }
 
     export function isTabletSize(): boolean {
-        return window?.innerWidth < pxt.BREAKPOINT_TABLET;
+        return window?.innerWidth <= pxt.BREAKPOINT_TABLET;
     }
 
     export function isComputerSize(): boolean {
-        return window?.innerWidth >= pxt.BREAKPOINT_TABLET;
+        return window?.innerWidth > pxt.BREAKPOINT_TABLET;
     }
 
     export function noSharedLocalStorage(): boolean {
@@ -1084,11 +1084,12 @@ namespace pxt.BrowserUtils {
         blocks: Map<number>;
         snippets: Map<Map<number>>;
         highlightBlocks: Map<Map<number>>;
+        validateBlocks: Map<Map<string[]>>;
     }
 
     export interface ITutorialInfoDb {
         getAsync(filename: string, code: string[], branch?: string): Promise<TutorialInfoIndexedDbEntry>;
-        setAsync(filename: string, snippets: Map<Map<number>>, code: string[], highlights: Map<Map<number>>, branch?: string): Promise<void>;
+        setAsync(filename: string, snippets: Map<Map<number>>, code: string[], highlights: Map<Map<number>>, codeValidationMap: Map<Map<string[]>>, branch?: string): Promise<void>;
         clearAsync(): Promise<void>;
     }
 
@@ -1139,14 +1140,14 @@ namespace pxt.BrowserUtils {
                 });
         }
 
-        setAsync(filename: string, snippets: Map<Map<number>>, code: string[], highlights: Map<Map<number>>, branch?: string): Promise<void> {
+        setAsync(filename: string, snippets: Map<Map<number>>, code: string[], highlights: Map<Map<number>>, codeValidationMap: Map<Map<string[]>>, branch?: string): Promise<void> {
             pxt.perf.measureStart("tutorial info db setAsync")
             const key = getTutorialInfoKey(filename, branch);
             const hash = getTutorialCodeHash(code);
-            return this.setWithHashAsync(filename, snippets, hash, highlights);
+            return this.setWithHashAsync(filename, snippets, hash, highlights, codeValidationMap);
         }
 
-        setWithHashAsync(filename: string, snippets: Map<Map<number>>, hash: string, highlights: Map<Map<number>>, branch?: string): Promise<void> {
+        setWithHashAsync(filename: string, snippets: Map<Map<number>>, hash: string, highlights: Map<Map<number>>, codeValidationMap: Map<Map<string[]>>, branch?: string): Promise<void> {
             pxt.perf.measureStart("tutorial info db setAsync")
             const key = getTutorialInfoKey(filename, branch);
             const blocks: Map<number> = {};
@@ -1163,6 +1164,7 @@ namespace pxt.BrowserUtils {
                 snippets,
                 blocks,
                 highlightBlocks: highlights,
+                validateBlocks: codeValidationMap
             };
 
             return this.db.setAsync(TutorialInfoIndexedDb.TABLE, entry)

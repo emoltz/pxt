@@ -6,11 +6,14 @@ import * as core from "./core";
 import * as coretsx from "./coretsx";
 import * as pkg from "./package";
 import * as cloudsync from "./cloudsync";
+import * as workspace from "./workspace";
 
 import Cloud = pxt.Cloud;
 import Util = pxt.Util;
+import { TimeMachine } from "./timeMachine";
 import { fireClickOnEnter } from "./util";
 import { pairAsync } from "./cmds";
+import { invalidate } from "./data";
 
 let dontShowDownloadFlag = false;
 
@@ -854,4 +857,84 @@ export function clearDontShowDownloadDialogFlag() {
 
 export function isDontShowDownloadDialogFlagSet() {
     return dontShowDownloadFlag;
+}
+
+export async function showTurnBackTimeDialogAsync(header: pxt.workspace.Header, reloadHeader: () => void) {
+    const text = await workspace.getTextAsync(header.id, true);
+    let history: pxt.workspace.HistoryFile;
+
+    if (text?.[pxt.HISTORY_FILE]) {
+        history = pxt.workspace.parseHistoryFile(text[pxt.HISTORY_FILE]);
+    }
+
+    const loadProject = async (text: pxt.workspace.ScriptText, editorVersion: string) => {
+        core.hideDialog();
+
+        header.targetVersion = editorVersion;
+
+        await workspace.saveSnapshotAsync(header.id);
+        await workspace.saveAsync(header, text);
+        reloadHeader();
+    }
+
+    const copyProject = async (text: pxt.workspace.ScriptText, editorVersion: string, timestamp?: number) => {
+        core.hideDialog();
+
+        let newHistory = history
+
+        if (timestamp != undefined) {
+            newHistory = {
+                entries:  history.entries.slice(0, history.entries.findIndex(e => e.timestamp === timestamp)),
+                snapshots: history.snapshots.filter(s => s.timestamp <= timestamp),
+                shares: history.shares.filter(s => s.timestamp <= timestamp)
+            }
+        }
+
+        if (text[pxt.HISTORY_FILE]) {
+            text[pxt.HISTORY_FILE] = JSON.stringify(newHistory);
+        }
+        const date = new Date(timestamp);
+
+        const dateString = date.toLocaleDateString(
+            pxt.U.userLanguage(),
+            {
+                year: "numeric",
+                month: "numeric",
+                day: "numeric"
+            }
+        );
+
+        const timeString = date.toLocaleTimeString(
+            pxt.U.userLanguage(),
+            {
+                timeStyle: "short"
+            } as any
+        );
+
+        const newHeader: pxt.workspace.Header = {
+            ...header,
+            targetVersion: editorVersion
+        }
+
+        await workspace.duplicateAsync(newHeader, `${newHeader.name} ${dateString} ${timeString}`, text);
+
+        invalidate("headers:");
+
+        core.infoNotification(lf("Project copy saved to My Projects"))
+    }
+
+    await core.dialogAsync({
+        header: lf("Turn back time"),
+        className: "time-machine-dialog",
+        size: "fullscreen",
+        hasCloseIcon: true,
+        jsx: (
+            <TimeMachine
+                history={history}
+                text={text}
+                onProjectLoad={loadProject}
+                onProjectCopy={copyProject}
+            />
+        )
+    })
 }

@@ -150,6 +150,7 @@ export class ProjectView
     private openingTypeScript: boolean;
     private preserveUndoStack: boolean;
     private rootClasses: string[];
+    private pendingImport: pxt.Util.DeferredPromise<void>;
 
     private highContrastSubscriber: data.DataSubscriber = {
         subscriptions: [],
@@ -599,9 +600,10 @@ export class ProjectView
         }
 
         // switch
-        if (this.isBlocksActive()) {
+        const header = this.state.header;
+        if (this.isBlocksActive() || header.editor == pxt.BLOCKS_PROJECT_NAME) {
             this.blocksEditor.openPython();
-        } else if (this.isJavaScriptActive()) {
+        } else if (this.isJavaScriptActive() || header.editor == pxt.JAVASCRIPT_PROJECT_NAME) {
             this.openPythonAsync();
         } else {
             // make sure there's .py file
@@ -650,6 +652,10 @@ export class ProjectView
         if (this.isBlocksActive()) {
             if (this.state.embedSimView) this.setState({ embedSimView: false });
             return;
+        }
+
+        if (pxt.appTarget.simulator?.headless && !this.state.collapseEditorTools) {
+            this.toggleSimulatorCollapse();
         }
 
         const mainBlocks = pkg.mainEditorPkg().files[pxt.MAIN_BLOCKS];
@@ -809,14 +815,15 @@ export class ProjectView
     private convertTypeScriptToPythonAsync() {
         const snap = this.editor.snapshotState();
         const fromLanguage = this.isBlocksActive() ? "blocks" : "ts";
-        const fromText = this.editorFile.content;
+        const mainFileName = this.isBlocksActive() ? pxt.MAIN_BLOCKS : pxt.MAIN_TS;
         const mainPkg = pkg.mainEditorPkg();
+        const fromText = mainPkg.files[mainFileName]?.content ?? "";
 
         let convertPromise: Promise<void>;
 
         const cached = mainPkg.getCachedTranspile(fromLanguage, fromText, "py");
         if (cached) {
-            convertPromise = this.saveVirtualFileAsync(pxt.PYTHON_PROJECT_NAME, cached, true);
+            convertPromise = this.saveVirtualMainFileAsync(pxt.PYTHON_PROJECT_NAME, cached, true);
         }
         else {
             convertPromise = this.saveTypeScriptAsync(false)
@@ -825,7 +832,7 @@ export class ProjectView
                     if (cres && cres.success) {
                         const mainpy = cres.outfiles[pxt.MAIN_PY];
                         mainPkg.cacheTranspile(fromLanguage, fromText, "py", mainpy);
-                        return this.saveVirtualFileAsync(pxt.PYTHON_PROJECT_NAME, mainpy, true);
+                        return this.saveVirtualMainFileAsync(pxt.PYTHON_PROJECT_NAME, mainpy, true);
                     } else {
                         const e = new Error("Failed to convert to Python.")
                         pxt.reportException(e);
@@ -996,9 +1003,6 @@ export class ProjectView
         if (!this.editor.isIncomplete()) {
             this.saveFileAsync(); // don't wait till save is done
             this.typecheck();
-
-            // If we are in a tutorial, call the validator for that editor (blocks, TS, etc)
-            if (this.isTutorial() && pxt.appTarget.appTheme.tutorialCodeValidation) this.editor.validateTutorialCode(this.state.tutorialOptions);
         }
         this.markdownChangeHandler();
     }, 500, false);
@@ -1286,10 +1290,20 @@ export class ProjectView
     setSideFile(fn: pkg.File, line?: number) {
         let fileName = fn.name;
         let currFile = this.state.currFile.name;
+
+        const header = this.state.header;
         if (fileName != currFile && pxt.editor.isBlocks(fn)) {
-            // Going from ts -> blocks
+            // Going from ts/py -> blocks
             pxt.tickEvent("sidebar.showBlocks");
             this.openBlocks();
+        } else if (header.editor != pxt.PYTHON_PROJECT_NAME && fileName.endsWith(".py")) {
+            // Going from non-py -> py
+            pxt.tickEvent("sidebar.showPython");
+            this.openPython();
+        } else if (header.editor != pxt.JAVASCRIPT_PROJECT_NAME && fileName.endsWith(".ts")) {
+            // Going from non-ts -> ts
+            pxt.tickEvent("sidebar.showTypescript");
+            this.openJavaScript();
         } else {
             if (this.isTextEditor() || this.isPxtJsonEditor()) {
                 this.textEditor.giveFocusOnLoading = false
@@ -1414,18 +1428,7 @@ export class ProjectView
             if (this.textEditor.giveFocusOnLoading && this.isTextEditor()) {
                 this.textEditor.editor?.focus();
             }
-            if (pxt.appTarget.appTheme.tutorialCodeValidation) this.editor.validateTutorialCode(this.state.tutorialOptions);
         }
-    }
-
-    setTutorialCodeStatus(step: number, status: pxt.tutorial.TutorialRuleStatus[]) {
-        const tutorialOptions = this.state.tutorialOptions;
-        const stepInfo = tutorialOptions.tutorialStepInfo[tutorialOptions.tutorialStep];
-        const tutorialCodeValidationIsOn = tutorialOptions.metadata.tutorialCodeValidation;
-        if (tutorialCodeValidationIsOn) stepInfo.listOfValidationRules = status;
-
-        // Update the state with the code status, so the tutorial card can re-render
-        this.setState({ tutorialOptions: tutorialOptions });
     }
 
     protected postTutorialProgress() {
@@ -2395,7 +2398,25 @@ export class ProjectView
         }
     }
 
-    importProjectAsync(project: pxt.workspace.Project, editorState?: pxt.editor.EditorState): Promise<void> {
+    async importProjectAsync(project: pxt.workspace.Project, editorState?: pxt.editor.EditorState): Promise<void> {
+        if (this.pendingImport) {
+            this.pendingImport.reject("concurrent import requests");
+        }
+
+        this.pendingImport = pxt.Util.defer<void>();
+
+        try {
+            await Promise.all([
+                this.installAndLoadProjectAsync(project, editorState),
+                this.pendingImport.promise
+            ]);
+        }
+        finally {
+            this.pendingImport = undefined;
+        }
+    }
+
+    protected async installAndLoadProjectAsync(project: pxt.workspace.Project, editorState?: pxt.editor.EditorState) {
         let h: pxt.workspace.InstallHeader = project.header;
         if (!h) {
             h = {
@@ -2409,8 +2430,8 @@ export class ProjectView
             }
         }
 
-        return workspace.installAsync(h, project.text)
-            .then(hd => this.loadHeaderAsync(hd, editorState));
+        const installed = await workspace.installAsync(h, project.text);
+        await this.loadHeaderAsync(installed, editorState);
     }
 
     importTutorialAsync(md: string) {
@@ -2446,7 +2467,7 @@ export class ProjectView
                 };
                 delete project.header.tutorial;
             }
-            return this.importProjectAsync(project);
+            return this.installAndLoadProjectAsync(project);
         }
 
         // If it's not a legacy project, it should be in the local workspace.
@@ -2999,10 +3020,19 @@ export class ProjectView
     }
 
     private saveVirtualFileAsync(prj: string, src: string, open: boolean): Promise<void> {
+        const fileName = this.editorFile.getVirtualFileName(prj);
+        return this.saveVirtualFileAsyncInternal(prj, src, open, fileName);
+    }
+
+    private saveVirtualMainFileAsync(prj: string, src: string, open: boolean): Promise<void> {
+        const fileName = this.getMainFileName(prj);
+        return this.saveVirtualFileAsyncInternal(prj, src, open, fileName);
+    }
+
+    private saveVirtualFileAsyncInternal(prj: string, src: string, open: boolean, fileName: string): Promise<void> {
         // language service does not like empty file
         src = src || "\n";
         const mainPkg = pkg.mainEditorPkg();
-        const fileName = this.editorFile.getVirtualFileName(prj);
         Util.assert(fileName && fileName != this.editorFile.name);
         return mainPkg.setContentAsync(fileName, src).then(() => {
             if (open) {
@@ -3010,6 +3040,17 @@ export class ProjectView
                 this.setFile(f);
             }
         });
+    }
+
+    private getMainFileName(prj: string): string {
+        switch (prj) {
+            case pxt.PYTHON_PROJECT_NAME: return pxt.MAIN_PY;
+            case pxt.JAVASCRIPT_PROJECT_NAME: return pxt.MAIN_TS;
+            case pxt.BLOCKS_PROJECT_NAME: return pxt.MAIN_BLOCKS;
+            default:
+                Util.assert(false, `Unrecognized project type ${prj}`);
+                return undefined;
+        }
     }
 
     saveTypeScriptAsync(open = false): Promise<void> {
@@ -3497,8 +3538,9 @@ export class ProjectView
     toggleSimulatorCollapse() {
         const state = this.state;
         pxt.tickEvent("simulator.toggleCollapse", { view: 'computer', collapsedTo: '' + !state.collapseEditorTools }, { interactiveConsent: true });
-        if (state.simState == pxt.editor.SimState.Stopped && state.collapseEditorTools)
+        if (state.simState == pxt.editor.SimState.Stopped && state.collapseEditorTools && !pxt.appTarget.simulator.headless) {
             this.startStopSimulator();
+        }
 
         if (state.collapseEditorTools) {
             this.expandSimulator();
@@ -3659,7 +3701,6 @@ export class ProjectView
             || this.debugOptionsChanged()) {
             this.startSimulator();
         } else {
-            simulator.driver.stopSound();
             simulator.driver.restart(); // fast restart
         }
         simulator.driver.focus()
@@ -3668,17 +3709,18 @@ export class ProjectView
         }
     }
 
-    startSimulator(opts?: pxt.editor.SimulatorStartOptions) {
+    async startSimulator(opts?: pxt.editor.SimulatorStartOptions) {
         pxt.tickEvent('simulator.start');
         const isDebugMatch = !this.debugOptionsChanged();
         const clickTrigger = opts && opts.clickTrigger;
         pxt.debug(`start sim (autorun ${this.state.autoRun})`)
-        if (!this.shouldStartSimulator() && isDebugMatch) {
+        if (!this.shouldStartSimulator() && isDebugMatch || this.state.home) {
             pxt.log("Ignoring call to start simulator, either already running or we shouldn't start.");
-            return Promise.resolve();
+            return;
         }
-        return this.saveFileAsync()
-            .then(() => this.runSimulator({ debug: this.state.debugging, clickTrigger }))
+
+        await this.saveFileAsync();
+        await this.runSimulator({ debug: this.state.debugging, clickTrigger });
     }
 
     debugOptionsChanged() {
@@ -3696,9 +3738,18 @@ export class ProjectView
             this.runToken.cancel()
             this.runToken = null
         }
-        simulator.stop(unload);
+
+        if (this.isSimulatorRunning() || unload && simulator.driver?.state !== pxsim.SimulatorState.Unloaded) {
+            simulator.stop(unload);
+        }
+
         const autoRun = this.state.autoRun && !clickTrigger; // if user pressed stop, don't restart
-        this.setState({ simState: pxt.editor.SimState.Stopped, autoRun: autoRun });
+
+        // Only fire setState if something changed
+        if (this.state.simState !== pxt.editor.SimState.Stopped || !!this.state.autoRun !== !!autoRun) {
+            this.setState({ simState: pxt.editor.SimState.Stopped, autoRun: autoRun });
+        }
+
         pxt.perf.measureEnd("stopSimulator")
     }
 
@@ -3719,8 +3770,10 @@ export class ProjectView
         this.clearSerial();
         // Not this.restartSimulator; need full restart to consistently update visuals,
         // and don't want to steal focus.
-        this.stopSimulator();
-        this.startSimulator();
+        if (this.isSimulatorRunning()) {
+            this.stopSimulator();
+            this.startSimulator();
+        }
 
         const highContrast = this.getData<boolean>(auth.HIGHCONTRAST);
         const bodyIsHighContrast = document.body.classList.contains("high-contrast");
@@ -4252,6 +4305,22 @@ export class ProjectView
         dialogs.showAboutDialogAsync(this);
     }
 
+    async showTurnBackTimeDialogAsync() {
+        let simWasRunning = this.isSimulatorRunning();
+        if (simWasRunning) {
+            this.stopSimulator();
+        }
+
+        await dialogs.showTurnBackTimeDialogAsync(this.state.header, () => {
+            this.reloadHeaderAsync();
+            simWasRunning = false;
+        });
+
+        if (simWasRunning) {
+            this.startSimulator();
+        }
+    }
+
     showLoginDialog(continuationHash?: string) {
         this.loginDialog.show(continuationHash);
     }
@@ -4658,7 +4727,7 @@ export class ProjectView
                         return this.loadHeaderAsync(curr);
                     }).finally(() => {
                         core.hideLoading("leavingtutorial")
-                        if (this.state.collapseEditorTools) {
+                        if (this.state.collapseEditorTools && !pxt.appTarget.simulator.headless) {
                             this.expandSimulator();
                         }
                         this.postTutorialProgress();
@@ -4717,9 +4786,16 @@ export class ProjectView
         return this.state.tutorialOptions != undefined;
     }
 
-    onTutorialLoaded() {
-        pxt.tickEvent("tutorial.editorLoaded")
-        this.postTutorialLoaded();
+    onEditorContentLoaded() {
+        if (this.isTutorial()) {
+            pxt.tickEvent("tutorial.editorLoaded")
+            this.postTutorialLoaded();
+        }
+
+        if (this.pendingImport) {
+            this.pendingImport.resolve();
+            this.pendingImport = undefined;
+        }
     }
 
     setEditorOffset() {
@@ -4958,7 +5034,7 @@ export class ProjectView
         const hideTutorialIteration = inTutorial && tutorialOptions.metadata?.hideIteration;
         const flyoutOnly = this.state.editorState?.hasCategories === false || (inTutorial && tutorialOptions.metadata?.flyoutOnly);
         const { hideEditorToolbar, transparentEditorToolbar } = targetTheme;
-        const hideMenuBar = targetTheme.hideMenuBar || hideTutorialIteration || (isTabTutorial && pxt.appTarget.appTheme.embeddedTutorial);
+        const hideMenuBar = targetTheme.hideMenuBar || hideTutorialIteration || (isTabTutorial && pxt.appTarget.appTheme.embeddedTutorial) || pxt.shell.isTimeMachineEmbed();
         const isHeadless = simOpts && simOpts.headless;
         const selectLanguage = targetTheme.selectLanguage;
         const showEditorToolbar = inEditor && !hideEditorToolbar && this.editor.hasEditorToolbar();

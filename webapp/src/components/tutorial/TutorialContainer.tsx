@@ -51,14 +51,16 @@ export function TutorialContainer(props: TutorialContainerProps) {
     const showImmersiveReader = pxt.appTarget.appTheme.immersiveReader;
     const isHorizontal = props.tutorialSimSidebar || pxt.BrowserUtils.isTabletSize();
 
+    const containerRef = React.useRef<HTMLDivElement>();
+    const stepContentRef = React.useRef<HTMLDivElement>();
+
     React.useEffect(() => {
         const observer = new ResizeObserver(updateScrollGradient);
         observer.observe(document.body)
 
         // We also want to update the scroll gradient if the tutorial wrapper is resized by the user.
-        const parent = document.querySelector("#tutorialWrapper");
-        if (parent) {
-            observer.observe(parent);
+        if (containerRef.current) {
+            observer.observe(containerRef.current);
         }
 
         return () => observer.disconnect();
@@ -85,7 +87,7 @@ export function TutorialContainer(props: TutorialContainerProps) {
         } else {
             setParentHeight();
         }
-    })
+    }, [props.hasBeenResized, document.body])
 
     React.useEffect(() => {
         setCurrentStep(props.currentStep);
@@ -93,7 +95,7 @@ export function TutorialContainer(props: TutorialContainerProps) {
 
     React.useEffect(() => {
         const contentDiv = contentRef?.current;
-        contentDiv.querySelector(".tutorial-step-content")?.focus();
+        if (stepContentRef.current) stepContentRef.current.focus();
         contentDiv.scrollTo(0, 0);
         updateScrollGradient();
         setStepErrorAttemptCount(0);
@@ -247,8 +249,11 @@ export function TutorialContainer(props: TutorialContainerProps) {
         onDone={onTutorialComplete} />;
     const hasHint = !!hintMarkdown;
 
+    const handleMarkedContentRef = (ref: HTMLDivElement) => {
+        stepContentRef.current = ref;
+    }
 
-    return <div className="tutorial-container">
+    return <div className="tutorial-container" ref={containerRef}>
         {!isHorizontal && stepCounter}
         <div className={classList("tutorial-content", hasHint && "has-hint")} ref={contentRef} onScroll={updateScrollGradient}>
             <div className={"tutorial-content-bkg"}>
@@ -258,7 +263,7 @@ export function TutorialContainer(props: TutorialContainerProps) {
                 </div>}
                 {showImmersiveReader && <ImmersiveReaderButton ref={immReaderRef} content={markdown} tutorialOptions={tutorialOptions} />}
                 {title && <div className="tutorial-title">{title}</div>}
-                <MarkedContent className="no-select tutorial-step-content" tabIndex={0} markdown={markdown} parent={parent}/>
+                <MarkedContent className="no-select tutorial-step-content" tabIndex={0} markdown={markdown} parent={parent} contentRef={handleMarkedContentRef}/>
                 <div className="tutorial-controls">
                     {hasHint && <TutorialHint tutorialId={tutorialId} currentStep={visibleStep} markdown={hintMarkdown} parent={parent} />}
                     {isHorizontal && stepCounter}

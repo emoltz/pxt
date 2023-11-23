@@ -392,6 +392,7 @@ namespace pxt {
         skillmapUrl?: string; // "/beta---skillmap"
         authcodeUrl?: string; // "/beta---authcode"
         multiplayerUrl?: string; // "/beta---multiplayer"
+        kioskUrl?: string; // "/beta---kiosk"
         isStatic?: boolean;
         verprefix?: string; // "v1"
     }
@@ -512,6 +513,7 @@ namespace pxt {
     export const TUTORIAL_CUSTOM_TS = "tutorial.custom.ts";
     export const BREAKPOINT_TABLET = 991; // TODO (shakao) revisit when tutorial stuff is more settled
     export const PALETTES_FILE = "_palettes.json";
+    export const HISTORY_FILE = "_history";
 
     export function outputName(trg: pxtc.CompileTarget = null) {
         if (!trg) trg = appTarget.compile

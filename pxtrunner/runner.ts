@@ -375,7 +375,7 @@ namespace pxt.runner {
     }
 
     export async function simulateAsync(container: HTMLElement, simOptions: SimulateOptions): Promise<pxtc.BuiltSimJsInfo> {
-        const builtSimJS = simOptions.builtJsInfo || await buildSimJsInfo(simOptions);
+        const builtSimJS = simOptions.builtJsInfo || await fetchSimJsInfo(simOptions) || await buildSimJsInfo(simOptions);
         const { js } = builtSimJS;
 
         if (!js) {
@@ -391,7 +391,7 @@ namespace pxt.runner {
                 simDriver.run(js, runOptions);
             }
             if (msg.command == "setstate") {
-                if (msg.stateKey && msg.stateValue) {
+                if (msg.stateKey) {
                     setStoredState(simOptions.id, msg.stateKey, msg.stateValue)
                 }
             }
@@ -464,6 +464,16 @@ namespace pxt.runner {
     }
     export function postSimMessage(msg: pxsim.SimulatorMessage) {
         simDriver?.postMessage(msg);
+    }
+
+    export async function fetchSimJsInfo(simOptions: SimulateOptions): Promise<pxtc.BuiltSimJsInfo> {
+        try {
+            return await pxt.Cloud.downloadBuiltSimJsInfoAsync(simOptions.id);
+        } catch (e) {
+            // This exception will happen in the majority of cases, so we don't want to log it unless for debugging.
+            pxt.debug(e.toString());
+            return undefined;
+        }
     }
 
     export async function buildSimJsInfo(simOptions: SimulateOptions): Promise<pxtc.BuiltSimJsInfo> {
@@ -549,7 +559,7 @@ namespace pxt.runner {
             return
         }
 
-        if (value)
+        if (value != null)
             storedState[key] = value
         else
             delete storedState[key]
