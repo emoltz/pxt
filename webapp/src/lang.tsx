@@ -3,10 +3,9 @@ import * as codecard from "./codecard"
 import * as sui from "./sui"
 import * as data from "./data"
 import * as core from "./core"
-import * as auth from "./auth"
-import { compose } from "redux";
 
-type ISettingsProps = pxt.editor.ISettingsProps;
+import ISettingsProps = pxt.editor.ISettingsProps;
+
 
 interface LanguagesState {
     visible?: boolean;
@@ -136,7 +135,7 @@ export class LanguagePicker extends data.Component<ISettingsProps, LanguagesStat
                     {targetTheme.crowdinProject ?
                         <div className="ui" id="langmodalfooter">
                             <sui.Link aria-label={lf("How do I add a new language?")} href="/translate" text={lf("How do I add a new language?")} target="_blank" />
-                            {translateTheEditor && <sui.Button aria-label={lf("Translate the editor")} onClick={this.translateEditor} text={lf("Translate the editor")} />}
+                            {translateTheEditor && <sui.Button className="neutral" aria-label={lf("Translate the editor")} onClick={this.translateEditor} text={lf("Translate the editor")} />}
                         </div> : undefined}
                 </div>
             </sui.Modal>

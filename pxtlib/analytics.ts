@@ -44,7 +44,7 @@ namespace pxt.analytics {
             {
                 const prefix = consoleTicks == ConsoleTickOptions.Short ? "" : `${new Date().toLocaleTimeString(undefined, { hour12: false })} - Tick - `;
                 const tickInfo = `${id} ${data ? JSON.stringify(data) : "<no data>"} ${opts ? JSON.stringify(opts) : "<no opts>"}`;
-                console.log(prefix + tickInfo);
+                pxt.log(prefix + tickInfo);
             }
 
             if (te) te(id, data, opts);
@@ -53,8 +53,8 @@ namespace pxt.analytics {
 
             if (!data) pxt.aiTrackEvent(id);
             else {
-                const props: Map<string> = { ...defaultProps } || {};
-                const measures: Map<number> = { ...defaultMeasures } || {};
+                const props: Map<string> = { ...defaultProps };
+                const measures: Map<number> = { ...defaultMeasures };
                 Object.keys(data).forEach(k => {
                     if (typeof data[k] == "string") props[k] = <string>data[k];
                     else if (typeof data[k] == "number") measures[k] = <number>data[k];
@@ -92,5 +92,17 @@ namespace pxt.analytics {
                 pxt.aiTrackException(err, 'error', props);
             }
         };
+    }
+
+    export function trackPerformanceReport() {
+        if (pxt.perf.perfReportLogged) return;
+
+        const data = pxt.perf.report();
+
+        if (data) {
+            const { durations, milestones } = data;
+            pxt.tickEvent("performance.milestones", milestones);
+            pxt.tickEvent("performance.durations", durations);
+        }
     }
 }

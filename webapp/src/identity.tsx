@@ -2,14 +2,14 @@
 
 import * as React from "react";
 import * as sui from "./sui";
-import * as core from "./core";
 import * as auth from "./auth";
 import * as data from "./data";
-import * as cloudsync from "./cloudsync";
 import * as cloud from "./cloud";
 import { SignInModal } from "../../react-common/components/profile/SignInModal";
 
-type ISettingsProps = pxt.editor.ISettingsProps;
+import ISettingsProps = pxt.editor.ISettingsProps;
+import UserInfo = pxt.editor.UserInfo;
+
 
 export type LoginDialogProps = ISettingsProps & {
 };
@@ -73,7 +73,7 @@ export class UserMenu extends auth.Component<UserMenuProps, UserMenuState> {
 
     handleDropdownClicked = () => {
         const loggedIn = this.isLoggedIn();
-        const githubUser = this.getData("github:user") as pxt.editor.UserInfo;
+        const githubUser = this.getData("github:user") as UserInfo;
         if (loggedIn || githubUser) {
             return true;
         } else {
@@ -100,9 +100,15 @@ export class UserMenu extends auth.Component<UserMenuProps, UserMenuState> {
         this.props.parent.signOutGithub();
     }
 
+    encodedAvatarPic(user: pxt.auth.UserProfile): string {
+        const type = user?.idp?.picture?.mimeType;
+        const encodedImg = user?.idp?.picture?.encoded;
+        return type && encodedImg ? `data:${type};base64,${encodedImg}` : "";
+    }
+
     avatarPicUrl(): string {
         const user = this.getUserProfile();
-        return user?.idp?.pictureUrl ?? user?.idp?.picture?.dataUrl;
+        return user?.idp?.pictureUrl ?? this.encodedAvatarPic(user);
     }
 
     hide() {
@@ -139,7 +145,7 @@ export class UserMenu extends auth.Component<UserMenuProps, UserMenuState> {
         );
         const signedInElem = this.avatarPicUrl() ? avatarElem : initialsElem;
 
-        const githubUser = this.getData("github:user") as pxt.editor.UserInfo;
+        const githubUser = this.getData("github:user") as UserInfo;
 
         return (
             <sui.DropdownMenu role="menuitem"
@@ -189,8 +195,8 @@ export class CloudSaveStatus extends data.Component<CloudSaveStatusProps, {}> {
         const syncing = preparing || cloudStatus.value === "syncing";
 
         return (<div className="cloudstatusarea">
-            {!syncing && <sui.Item className={"ui tiny cloudicon xicon " + cloudStatus.icon} title={cloudStatus.tooltip} tabIndex={-1}></sui.Item>}
-            {syncing && <sui.Item className={"ui tiny inline loader active cloudprogress" + (preparing ? " indeterminate" : "")} title={cloudStatus.tooltip} tabIndex={-1}></sui.Item>}
+            {!syncing && <sui.Item role="presentation" className={"ui tiny cloudicon xicon " + cloudStatus.icon} title={cloudStatus.tooltip} tabIndex={-1}></sui.Item>}
+            {syncing && <sui.Item role="presentation" className={"ui tiny inline loader active cloudprogress" + (preparing ? " indeterminate" : "")} title={cloudStatus.tooltip} tabIndex={-1}></sui.Item>}
             {cloudStatus.value !== "none" && cloudStatus.value !== "synced" && <span className="ui mobile hide no-select cloudtext" role="note">{cloudStatus.shortStatus}</span>}
         </div>);
     }

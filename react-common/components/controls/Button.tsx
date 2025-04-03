@@ -5,6 +5,7 @@ export interface ButtonViewProps extends ContainerProps {
     buttonRef?: (ref: HTMLButtonElement) => void;
     title: string;
     label?: string | JSX.Element;
+    labelClassName?: string;
     leftIcon?: string;
     rightIcon?: string;
     disabled?: boolean;     // Disables the button in an accessible-friendly way.
@@ -21,11 +22,13 @@ export interface ButtonViewProps extends ContainerProps {
     ariaPosInSet?: number;
     ariaSetSize?: number;
     ariaSelected?: boolean;
+    ariaPressed?: boolean | "mixed";
 }
 
 
 export interface ButtonProps extends ButtonViewProps {
     onClick: () => void;
+    onRightClick?: () => void;
     onBlur?: () => void;
     onKeydown?: (e: React.KeyboardEvent) => void;
 }
@@ -44,13 +47,16 @@ export const Button = (props: ButtonProps) => {
         ariaPosInSet,
         ariaSetSize,
         ariaSelected,
+        ariaPressed,
         role,
         onClick,
+        onRightClick,
         onKeydown,
         onBlur,
         buttonRef,
         title,
         label,
+        labelClassName,
         leftIcon,
         rightIcon,
         hardDisabled,
@@ -80,6 +86,14 @@ export const Button = (props: ButtonProps) => {
         ev.preventDefault();
     }
 
+    let rightClickHandler = (ev: React.MouseEvent) => {
+        if (onRightClick) {
+            onRightClick();
+            ev.stopPropagation();
+            ev.preventDefault();
+        }
+    }
+
     return (
         <button
             id={id}
@@ -88,6 +102,7 @@ export const Button = (props: ButtonProps) => {
             title={title}
             ref={buttonRef}
             onClick={!disabled ? clickHandler : undefined}
+            onContextMenu={rightClickHandler}
             onKeyDown={onKeydown || fireClickOnEnter}
             onBlur={onBlur}
             role={role || "button"}
@@ -101,11 +116,12 @@ export const Button = (props: ButtonProps) => {
             aria-posinset={ariaPosInSet}
             aria-setsize={ariaSetSize}
             aria-describedby={ariaDescribedBy}
-            aria-selected={ariaSelected}>
+            aria-selected={ariaSelected}
+            aria-pressed={ariaPressed}>
                 {(leftIcon || rightIcon || label) && (
                     <span className="common-button-flex">
                         {leftIcon && <i className={leftIcon} aria-hidden={true}/>}
-                        <span className="common-button-label">
+                        <span className={classList("common-button-label", labelClassName)}>
                             {label}
                         </span>
                         {rightIcon && <i className={"right " + rightIcon} aria-hidden={true}/>}

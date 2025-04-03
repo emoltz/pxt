@@ -1,5 +1,4 @@
 /// <reference path="../../built/pxtlib.d.ts" />
-/// <reference path="../../built/pxteditor.d.ts" />
 
 import * as db from "./db";
 import * as core from "./core";
@@ -14,10 +13,14 @@ import * as compiler from "./compiler"
 import * as auth from "./auth"
 import * as cloud from "./cloud"
 
-import * as dmp from "diff-match-patch";
+import * as pxteditor from "../../pxteditor";
 
 import U = pxt.Util;
 import Cloud = pxt.Cloud;
+
+import * as pxtblockly from "../../pxtblocks";
+import { getTextAtTime, HistoryFile } from "../../pxteditor/history";
+import { Milestones } from "./constants";
 
 
 // Avoid importing entire crypto-js
@@ -53,11 +56,31 @@ export function gitsha(data: string, encoding: "utf-8" | "base64" = "utf-8") {
         return (sha1("blob " + U.toUTF8(data).length + "\u0000" + data) + "")
 }
 
-export function copyProjectToLegacyEditor(header: Header, majorVersion: number): Promise<Header> {
+export async function copyProjectToLegacyEditor(header: Header, majorVersion: number): Promise<Header> {
     if (!isBrowserWorkspace()) {
         return Promise.reject("Copy operation only works in browser workspace");
     }
-    return browserworkspace.copyProjectToLegacyEditor(header, majorVersion);
+
+    const script = await getTextAsync(header.id);
+
+    const newHeader = pxt.Util.clone(header);
+    delete (newHeader as any)._id;
+    delete newHeader._rev;
+    newHeader.id = pxt.Util.guidGen();
+
+    // We don't know if the legacy editor uses the indexedDB or PouchDB workspace, so we're going
+    // to copy the project to both places
+    try {
+        await browserworkspace.copyProjectToLegacyEditor(newHeader, script, majorVersion);
+    }
+    catch (e) {
+        pxt.reportException(e);
+        pxt.log("Unable to port project to PouchDB")
+    }
+
+    await indexedDBWorkspace.copyProjectToLegacyEditorAsync(newHeader, script, majorVersion);
+
+    return newHeader;
 }
 
 export function setupWorkspace(id: string) {
@@ -78,12 +101,13 @@ export function setupWorkspace(id: string) {
             // Iframe workspace, the editor relays sync messages back and forth when hosted in an iframe
             impl = iframeworkspace.provider;
             break;
-        case "idb":
-            impl = indexedDBWorkspace.provider;
+        case "pouch":
+            impl = browserworkspace.provider
             break;
+        case "idb":
         case "browser":
         default:
-            impl = browserworkspace.provider
+            impl = indexedDBWorkspace.provider;
             break;
     }
 }
@@ -269,14 +293,14 @@ export function getLastCloudSync(): number {
 
 export function initAsync() {
     if (!impl) {
-        impl = browserworkspace.provider;
+        impl = indexedDBWorkspace.provider;
         implType = "browser";
     }
 
     return syncAsync()
         .then(state => cleanupBackupsAsync().then(() => state))
         .then(_ => {
-            pxt.perf.recordMilestone("workspace init finished")
+            pxt.perf.recordMilestone(Milestones.WorkspaceInitFinished)
             return _
         })
 }
@@ -310,7 +334,7 @@ export async function saveSnapshotAsync(id: string): Promise<void> {
     await enqueueHistoryOperationAsync(
         id,
         text => {
-            pxt.workspace.pushSnapshotOnHistory(text, Date.now())
+            pxteditor.history.pushSnapshotOnHistory(text, Date.now())
         }
     );
 }
@@ -319,7 +343,7 @@ export async function updateShareHistoryAsync(id: string): Promise<void> {
     await enqueueHistoryOperationAsync(
         id,
         (text, header) => {
-            pxt.workspace.updateShareHistory(text, Date.now(), header.pubVersions || [])
+            pxteditor.history.updateShareHistory(text, Date.now(), header.pubVersions || [])
         }
     );
 }
@@ -550,7 +574,6 @@ export async function saveAsync(h: Header, text?: ScriptText, fromCloudSync?: bo
             text,
             version: null
         }
-        allScripts.push(e)
     }
 
     const hasUserFileChanges = () => {
@@ -640,7 +663,7 @@ export async function saveAsync(h: Header, text?: ScriptText, fromCloudSync?: bo
                     }
 
                     if (toWrite) {
-                        pxt.workspace.updateHistory(previous.text, toWrite, Date.now(), h.pubVersions || [], diffText, patchText);
+                        pxteditor.history.updateHistory(previous.text, toWrite, Date.now(), h.pubVersions || [], diffText, patchText);
                     }
                 }
             }
@@ -648,7 +671,7 @@ export async function saveAsync(h: Header, text?: ScriptText, fromCloudSync?: bo
                 // If this fails for some reason, the history is going to end
                 // up being corrupted. Should we switch to memory db?
                 pxt.reportException(e);
-                console.warn("Unable to update project history", e);
+                pxt.warn("Unable to update project history", e);
             }
         }
 
@@ -667,6 +690,10 @@ export async function saveAsync(h: Header, text?: ScriptText, fromCloudSync?: bo
 
         if (text) {
             e.version = ver;
+        }
+
+        if (newSave) {
+            allScripts.push(e);
         }
 
         if (isUserChange) {
@@ -702,18 +729,17 @@ function computePath(h: Header) {
 
     return path
 }
-const differ = new dmp.diff_match_patch();
 
 function diffText(a: string, b: string) {
-    return differ.patch_make(a, b);
+    return pxt.diff.computePatch(a, b);
 }
 
 function patchText(patch: unknown, a: string) {
-    return differ.patch_apply(patch as any, a)[0]
+    return pxt.diff.applyPatch(a, patch as any)
 }
 
-export function applyDiff(text: ScriptText, history: pxt.workspace.HistoryEntry) {
-    return pxt.workspace.applyDiff(text, history, patchText);
+export function restoreTextToTime(text: ScriptText, history: HistoryFile, timestamp: number) {
+    return getTextAtTime(text, history, timestamp, patchText);
 }
 
 export function importAsync(h: Header, text: ScriptText, isCloud = false) {
@@ -721,7 +747,7 @@ export function importAsync(h: Header, text: ScriptText, isCloud = false) {
     return forceSaveAsync(h, text, isCloud)
 }
 
-export function installAsync(h0: InstallHeader, text: ScriptText, dontOverwriteID = false) {
+export async function installAsync(h0: InstallHeader, text: ScriptText, dontOverwriteID = false) {
     U.assert(h0.target == pxt.appTarget.id);
 
     const h = <Header>h0
@@ -735,9 +761,24 @@ export function installAsync(h0: InstallHeader, text: ScriptText, dontOverwriteI
         pxt.shell.setEditorLanguagePref(cfg.preferredEditor);
     }
 
-    return pxt.github.cacheProjectDependenciesAsync(cfg)
-        .then(() => importAsync(h, text))
-        .then(() => h);
+    await pxt.github.cacheProjectDependenciesAsync(cfg)
+    await importAsync(h, text);
+    return h;
+}
+
+export async function renameAsync(h: Header, newName: string): Promise<Header> {
+    const text = await getTextAsync(h.id);
+
+    let newHdr = U.flatClone(h)
+
+    const dupText = U.flatClone(text);
+    newHdr.name = newName;
+    const cfg = JSON.parse(text[pxt.CONFIG_NAME]) as pxt.PackageConfig;
+    cfg.name = newHdr.name;
+    dupText[pxt.CONFIG_NAME] = pxt.Package.stringifyConfig(cfg);
+
+    await importAsync(newHdr, dupText);
+    return newHdr;
 }
 
 export async function duplicateAsync(h: Header, newName?: string, newText?: ScriptText): Promise<Header> {
@@ -809,7 +850,6 @@ export function fixupFileNames(txt: ScriptText) {
 
 
 const scriptDlQ = new U.PromiseQueue();
-const scripts = new db.Table("script"); // cache for published scripts
 export async function getPublishedScriptAsync(id: string) {
     if (pxt.github.isGithubId(id))
         id = pxt.github.normalizeRepoId(id)
@@ -817,8 +857,9 @@ export async function getPublishedScriptAsync(id: string) {
     const eid = encodeURIComponent(pxt.github.upgradedPackageId(config, id))
     return await scriptDlQ.enqueue(eid, async () => {
         let files: ScriptText
+        const scriptCache = await getScriptCacheAsync();
         try {
-            files = (await scripts.getAsync(eid)).files
+            files = (await scriptCache.getAsync(eid)).files
         } catch {
             if (pxt.github.isGithubId(id)) {
                 files = (await pxt.github.downloadPackageAsync(id, config)).files
@@ -827,7 +868,7 @@ export async function getPublishedScriptAsync(id: string) {
                     .catch(core.handleNetworkError))
             }
             try {
-                await scripts.setAsync({ id: eid, files: files })
+                await scriptCache.setAsync({ id: eid, files: files })
             }
             catch (e) {
                 // Don't fail if the indexeddb fails, but log it
@@ -1209,7 +1250,7 @@ async function githubUpdateToAsync(hd: Header, options: UpdateOptions) {
                     throw mergeError()
             } else if (/\.blocks$/.test(path)) {
                 // blocks file, try merging the blocks or clear it so that ts merge picks it up
-                const d3 = pxt.blocks.mergeXml(files[path], oldEnt.blobContent, treeEnt.blobContent);
+                const d3 = pxtblockly.mergeXml(files[path], oldEnt.blobContent, treeEnt.blobContent);
                 // if xml merge fails, leave an empty xml payload to force decompilation
                 blocksNeedDecompilation = blocksNeedDecompilation || !d3;
                 text = d3 || "";
@@ -1336,9 +1377,9 @@ export async function exportToGithubAsync(hd: Header, repoid: string) {
     // assign ids to blockly blocks
     const mainBlocks = files[pxt.MAIN_BLOCKS];
     if (mainBlocks) {
-        const ws = pxt.blocks.loadWorkspaceXml(mainBlocks, true);
+        const ws = pxtblockly.loadWorkspaceXml(mainBlocks, true);
         if (ws) {
-            const mainBlocksWithIds = pxt.blocks.saveWorkspaceXml(ws, true);
+            const mainBlocksWithIds = pxtblockly.saveWorkspaceXml(ws, true);
             if (mainBlocksWithIds)
                 files[pxt.MAIN_BLOCKS] = mainBlocksWithIds;
         }
@@ -1681,23 +1722,24 @@ export function syncAsync(): Promise<pxt.editor.EditorSyncState> {
         });
 }
 
-export function resetAsync() {
+export async function resetAsync() {
     allScripts = []
-    return impl.resetAsync()
-        .then(cloudsync.resetAsync)
-        .then(db.destroyAsync)
-        .then(pxt.BrowserUtils.clearTranslationDbAsync)
-        .then(pxt.BrowserUtils.clearTutorialInfoDbAsync)
-        .then(compiler.clearApiInfoDbAsync)
-        .then(() => {
-            pxt.storage.clearLocal();
-            data.clearCache();
-            // keep local token (localhost and electron) on reset
-            if (Cloud.localToken)
-                pxt.storage.setLocal("local_token", Cloud.localToken);
-        })
-        .then(() => syncAsync()) // sync again to notify other tabs
-        .then(() => { });
+
+    await impl.resetAsync();
+    await cloudsync.resetAsync();
+    await db.destroyAsync();
+    await pxt.BrowserUtils.clearTranslationDbAsync();
+    await pxt.BrowserUtils.clearTutorialInfoDbAsync();
+    await compiler.clearApiInfoDbAsync();
+    pxt.storage.clearLocal();
+    data.clearCache();
+
+    // keep local token (localhost and electron) on reset
+    if (Cloud.localToken) {
+        pxt.storage.setLocal("local_token", Cloud.localToken);
+    }
+
+    await syncAsync(); // sync again to notify other tabs
 }
 
 export function loadedAsync() {
@@ -1720,10 +1762,10 @@ export function listAssetsAsync(id: string): Promise<pxt.workspace.Asset[]> {
 }
 
 export function isBrowserWorkspace() {
-    return impl === browserworkspace.provider;
+    return impl === indexedDBWorkspace.provider;
 }
 
-export function fireEvent(ev: pxt.editor.events.Event) {
+export function fireEvent(ev: pxt.editor.EditorEvent) {
     if (impl.fireEvent)
         return impl.fireEvent(ev)
     // otherwise, NOP
@@ -1744,6 +1786,10 @@ function dbgShorten(s: string): string {
 export function dbgHdrToString(h: Header): string {
     if (!h) return "#null"
     return `${h.name} ${h.id.substr(0, 4)}..v${dbgShorten(h.cloudVersion)}@${h.modificationTime % 100}-${U.timeSince(h.modificationTime)}`;
+}
+
+async function getScriptCacheAsync(): Promise<pxt.BrowserUtils.IDBObjectStoreWrapper<{id: string, files: ScriptText}>> {
+    return indexedDBWorkspace.getObjectStoreAsync(indexedDBWorkspace.SCRIPT_TABLE)
 }
 
 /*

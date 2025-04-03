@@ -29,6 +29,7 @@ import * as pyconv from './pyconv';
 import * as gitfs from './gitfs';
 import * as crowdin from './crowdin';
 import * as youtube from './youtube';
+import { SUB_WEBAPPS } from './subwebapp';
 
 const rimraf: (f: string, opts: any, cb: (err: Error, res: any) => void) => void = require('rimraf');
 
@@ -37,8 +38,10 @@ pxt.docs.requireDOMSanitizer = () => require("sanitize-html");
 let forceCloudBuild = process.env["KS_FORCE_CLOUD"] !== "no";
 let forceLocalBuild = !!process.env["PXT_FORCE_LOCAL"];
 let forceBuild = false; // don't use cache
+let useCompileServiceDocker = false;
 
 Error.stackTraceLimit = 100;
+
 
 function parseHwVariant(parsed: commandParser.ParsedCommand) {
     let hwvariant = parsed && parsed.flags["hwvariant"] as string;
@@ -62,6 +65,7 @@ function parseHwVariant(parsed: commandParser.ParsedCommand) {
 function parseBuildInfo(parsed?: commandParser.ParsedCommand) {
     const cloud = parsed && parsed.flags["cloudbuild"];
     const local = parsed && parsed.flags["localbuild"];
+    const useCompService = parsed?.flags["localcompileservice"]
     const hwvariant = parseHwVariant(parsed);
     forceBuild = parsed && !!parsed.flags["force"];
     if (cloud && local)
@@ -74,6 +78,11 @@ function parseBuildInfo(parsed?: commandParser.ParsedCommand) {
     if (local) {
         forceCloudBuild = false;
         forceLocalBuild = true;
+    }
+    if (useCompService) {
+        forceCloudBuild = false;
+        forceLocalBuild = true;
+        useCompileServiceDocker = true;
     }
 
     if (hwvariant) {
@@ -243,6 +252,14 @@ class FileGithubDb implements pxt.github.IGithubDb {
     loadPackageAsync(repopath: string, tag: string): Promise<pxt.github.CachedPackage> {
         return this.loadAsync(repopath, tag, "pkg", (r, t) => this.db.loadPackageAsync(r, t));
     }
+
+    loadTutorialMarkdown(repopath: string, tag?: string): Promise<pxt.github.CachedPackage> {
+        return this.loadAsync(repopath, tag, "tutorial", (r, t) => this.db.loadTutorialMarkdown(r, t));
+    }
+
+    cacheReposAsync(resp: pxt.github.GHTutorialResponse) {
+        return this.db.cacheReposAsync(resp);
+    }
 }
 
 function searchAsync(...query: string[]) {
@@ -354,22 +371,16 @@ function onlyExts(files: string[], exts: string[]) {
 }
 
 function pxtFileList(pref: string) {
-    return nodeutil.allFiles(pref + "webapp/public")
+    let allFiles = nodeutil.allFiles(pref + "webapp/public")
         .concat(onlyExts(nodeutil.allFiles(pref + "built/web", { maxDepth: 1 }), [".js", ".css"]))
         .concat(nodeutil.allFiles(pref + "built/web/fonts", { maxDepth: 1 }))
-        .concat(nodeutil.allFiles(pref + "built/web/vs", { maxDepth: 4 }))
-        .concat(nodeutil.allFiles(pref + "built/web/skillmap", { maxDepth: 4 }))
-        .concat(nodeutil.allFiles(pref + "built/web/authcode", { maxDepth: 4 }))
-        .concat(nodeutil.allFiles(pref + "built/web/multiplayer", { maxDepth: 4 }))
-        .concat(nodeutil.allFiles(pref + "built/web/kiosk", { maxDepth: 4 }))
-}
+        .concat(nodeutil.allFiles(pref + "built/web/vs", { maxDepth: 4 }));
 
-function semverCmp(a: string, b: string) {
-    let parse = (s: string) => {
-        let v = s.split(/\./).map(parseInt)
-        return v[0] * 100000000 + v[1] * 10000 + v[2]
+    for (const subapp of SUB_WEBAPPS) {
+        allFiles = allFiles.concat(nodeutil.allFiles(pref + `built/web/${subapp.name}`, { maxDepth: 4 }))
     }
-    return parse(a) - parse(b)
+
+    return allFiles;
 }
 
 function checkIfTaggedCommitAsync() {
@@ -393,7 +404,7 @@ function checkIfTaggedCommitAsync() {
 
 let readJson = nodeutil.readJson;
 
-function ciAsync() {
+async function ciAsync() {
     forceCloudBuild = true;
     const buildInfo = ciBuildInfo();
     pxt.log(`ci build using ${buildInfo.ci}`);
@@ -446,53 +457,54 @@ function ciAsync() {
     let pkg = readJson("package.json")
     if (pkg["name"] == "pxt-core") {
         pxt.log("pxt-core build");
-        return checkIfTaggedCommitAsync()
-            .then(isTaggedCommit => {
-                pxt.log(`is tagged commit: ${isTaggedCommit}`);
-                let p = npmPublishAsync();
-                if (branch === "master" && isTaggedCommit) {
-                    if (uploadDocs)
-                        p = p
-                            .then(() => buildWebStringsAsync())
-                            .then(() => crowdin.execCrowdinAsync("upload", "built/webstrings.json"))
-                            .then(() => crowdin.execCrowdinAsync("upload", "built/skillmap-strings.json"))
-                            .then(() => crowdin.execCrowdinAsync("upload", "built/authcode-strings.json"))
-                            .then(() => crowdin.execCrowdinAsync("upload", "built/multiplayer-strings.json"))
-                            .then(() => crowdin.execCrowdinAsync("upload", "built/kiosk-strings.json"));
-                    if (uploadApiStrings)
-                        p = p.then(() => crowdin.execCrowdinAsync("upload", "built/strings.json"))
-                    if (uploadDocs || uploadApiStrings)
-                        p = p.then(() => crowdin.internalUploadTargetTranslationsAsync(uploadApiStrings, uploadDocs));
+
+        const isTaggedCommit = await checkIfTaggedCommitAsync();
+        pxt.log(`is tagged commit: ${isTaggedCommit}`);
+        await npmPublishAsync();
+        if (branch === "master" && isTaggedCommit) {
+            if (uploadDocs) {
+                await buildWebStringsAsync();
+                await crowdin.uploadBuiltStringsAsync("built/webstrings.json");
+
+                for (const subapp of SUB_WEBAPPS) {
+                    await crowdin.uploadBuiltStringsAsync(`built/${subapp.name}-strings.json`);
                 }
-                return p;
-            });
+            }
+            if (uploadApiStrings) {
+                await crowdin.uploadBuiltStringsAsync("built/strings.json");
+            }
+            if (uploadDocs || uploadApiStrings) {
+                await crowdin.internalUploadTargetTranslationsAsync(uploadApiStrings, uploadDocs);
+                pxt.log("translations uploaded");
+            }
+            else {
+                pxt.log("skipping translations upload");
+            }
+        }
     } else {
         pxt.log("target build");
-        return internalBuildTargetAsync()
-            .then(() => internalCheckDocsAsync(true))
-            .then(() => blockTestsAsync())
-            .then(() => npmPublishAsync())
-            .then(() => {
-                if (!process.env["PXT_ACCESS_TOKEN"]) {
-                    // pull request, don't try to upload target
-                    pxt.log('no token, skipping upload')
-                    return Promise.resolve();
-                }
-                const trg = readLocalPxTarget();
-                const label = `${trg.id}/${tag || latest}`;
-                pxt.log(`uploading target with label ${label}...`);
-                return uploadTargetAsync(label);
-            })
-            .then(() => {
-                pxt.log("target uploaded");
-                if (uploadDocs || uploadApiStrings) {
-                    return crowdin.internalUploadTargetTranslationsAsync(uploadApiStrings, uploadDocs)
-                        .then(() => pxt.log("translations uploaded"));
-                } else {
-                    pxt.log("skipping translations upload");
-                    return Promise.resolve();
-                }
-            });
+        await internalBuildTargetAsync();
+        await internalCheckDocsAsync(true);
+        await blockTestsAsync();
+        await npmPublishAsync();
+
+        if (!process.env["PXT_ACCESS_TOKEN"]) {
+            // pull request, don't try to upload target
+            pxt.log('no token, skipping upload')
+            return;
+        }
+        const trg = readLocalPxTarget();
+        const label = `${trg.id}/${tag || latest}`;
+        pxt.log(`uploading target with label ${label}...`);
+        await uploadTargetAsync(label);
+
+        pxt.log("target uploaded");
+        if (uploadDocs || uploadApiStrings) {
+            await crowdin.internalUploadTargetTranslationsAsync(uploadApiStrings, uploadDocs);
+            pxt.log("translations uploaded");
+        } else {
+            pxt.log("skipping translations upload");
+        }
     }
 }
 
@@ -1019,7 +1031,7 @@ function uploadCoreAsync(opts: UploadOptions) {
     }
 
     if (opts.localDir) {
-        let cfg: pxt.WebConfig = {
+        let cfg: Partial<pxt.WebConfig> = {
             "relprefix": opts.localDir,
             "verprefix": "",
             "workerjs": opts.localDir + "worker.js",
@@ -1045,12 +1057,13 @@ function uploadCoreAsync(opts: UploadOptions) {
             "docsUrl": opts.localDir + "docs.html",
             "multiUrl": opts.localDir + "multi.html",
             "asseteditorUrl": opts.localDir + "asseteditor.html",
-            "skillmapUrl": opts.localDir + "skillmap.html",
-            "authcodeUrl": opts.localDir + "authcode.html",
-            "multiplayerUrl": opts.localDir + "multiplayer.html",
-            "kioskUrl": opts.localDir + "kiosk.html",
             "isStatic": true,
         }
+
+        for (const subapp of SUB_WEBAPPS) {
+            (cfg as any)[subapp.name + "Url"] = opts.localDir + subapp.name + ".html";
+        }
+
         const targetImageLocalPaths = targetImagePaths.map(k =>
             `${opts.localDir}${path.join('./docs', k)}`);
 
@@ -1097,22 +1110,19 @@ function uploadCoreAsync(opts: UploadOptions) {
         "sim.webmanifest",
         "workerConfig.js",
         "multi.html",
-        "asseteditor.html",
-        "skillmap.html",
-        "authcode.html",
-        "multiplayer.html",
-        "kiosk.html",
+        "asseteditor.html"
     ]
 
     // expandHtml is manually called on these files before upload
     // runs <!-- @include --> substitutions, fills in locale, etc
     const expandFiles = [
-        "index.html",
-        "skillmap.html",
-        "authcode.html",
-        "multiplayer.html",
-        "kiosk.html",
+        "index.html"
     ]
+
+    for (const subapp of SUB_WEBAPPS) {
+        replFiles.push(`${subapp.name}.html`);
+        expandFiles.push(`${subapp.name}.html`);
+    }
 
     nodeutil.mkdirP("built/uploadrepl")
 
@@ -1439,37 +1449,40 @@ export function buildTargetAsync(parsed?: commandParser.ParsedCommand): Promise<
         .then(() => internalBuildTargetAsync(opts));
 }
 
-export function internalBuildTargetAsync(options: BuildTargetOptions = {}): Promise<void> {
+export async function internalBuildTargetAsync(options: BuildTargetOptions = {}): Promise<void> {
     if (pxt.appTarget.id == "core")
         return buildTargetCoreAsync(options)
-
-    let initPromise: Promise<void>;
 
     const commonPackageDir = path.resolve("node_modules/pxt-common-packages")
 
     // Make sure to build common sim in case of a local clean. This will do nothing for
     // targets without pxt-common-packages installed.
     if (!inCommonPkg("built/common-sim.js") || !inCommonPkg("built/common-sim.d.ts")) {
-        initPromise = buildCommonSimAsync();
+        await buildCommonSimAsync();
+    }
+
+    if (nodeutil.existsDirSync(simDir())) {
+        await extractLocStringsAsync("sim-strings", [simDir()]);
+    }
+
+    copyCommonSim();
+    await simshimAsync();
+    await buildFolderAsync('compiler', true, 'compiler');
+    fillInCompilerExtension(pxt.appTarget);
+
+    if (options.rebundle) {
+        await buildTargetCoreAsync({ quick: true });
     }
     else {
-        initPromise = Promise.resolve();
+        await buildTargetCoreAsync(options);
     }
 
-    if (nodeutil.existsDirSync(simDir()))
-        initPromise = initPromise.then(() => extractLocStringsAsync("sim-strings", [simDir()]));
-
-    return initPromise
-        .then(() => { copyCommonSim(); return simshimAsync() })
-        .then(() => buildFolderAsync('compiler', true, 'compiler'))
-        .then(() => fillInCompilerExtension(pxt.appTarget))
-        .then(() => options.rebundle ? buildTargetCoreAsync({ quick: true }) : buildTargetCoreAsync(options))
-        .then(() => buildSimAsync())
-        .then(() => buildFolderAsync('cmds', true))
-        .then(() => buildSemanticUIAsync())
-        .then(() => buildEditorExtensionAsync("editor", "extendEditor"))
-        .then(() => buildEditorExtensionAsync("fieldeditors", "extendFieldEditors"))
-        .then(() => buildFolderAsync('server', true, 'server'))
+    await buildSimAsync();
+    await buildFolderAsync('cmds', true);
+    await buildSemanticUIAsync();
+    await buildEditorExtensionAsync("editor", "extendEditor");
+    await buildEditorExtensionAsync("fieldeditors", "extendFieldEditors");
+    await buildFolderAsync('server', true, 'server');
 
     function inCommonPkg(p: string) {
         return fs.existsSync(path.join(commonPackageDir, p));
@@ -1817,6 +1830,9 @@ function saveThemeJson(cfg: pxt.TargetBundle, localDir?: boolean, packaged?: boo
             if (extraType.label) {
                 targetStrings[`{id:type}${extraType.label}`] = extraType.label;
             }
+            else {
+                targetStrings[`{id:type}${extraType.typeName}`] = extraType.typeName;
+            }
 
             if (extraType.defaultName) {
                 targetStrings[`{id:var}${extraType.defaultName}`] = extraType.defaultName;
@@ -1933,6 +1949,18 @@ ${gcards.map(gcard => `[${gcard.name}](${gcard.url})`).join(',\n')}
                 targetStrings[`{id:hardware-description}${opt.description}`] = opt.description;
         }
     }
+
+    const themeFiles = getThemeFilePaths();
+    for(const themePath of themeFiles) {
+        if (nodeutil.fileExistsSync(themePath)) {
+            const theme = nodeutil.readJson(themePath);
+            const name = theme["name"];
+            if (name) {
+                targetStrings[`{id:color-theme-name}${name}`] = name;
+            }
+        }
+    }
+
     // extract strings from editor
     ["editor", "fieldeditors", "cmds"]
         .filter(d => nodeutil.existsDirSync(d))
@@ -2038,11 +2066,10 @@ async function buildSemanticUIAsync(parsed?: commandParser.ParsedCommand) {
     }
 
     // Generate react-common css for skillmap, authcode, and multiplayer (but not kiosk yet)
-    await Promise.all([
-        generateReactCommonCss("skillmap"),
-        generateReactCommonCss("authcode"),
-        generateReactCommonCss("multiplayer")
-    ]);
+
+    await Promise.all(
+        SUB_WEBAPPS.filter(app => app.buildCss).map(app => generateReactCommonCss(app.name))
+    );
 
     // Run postcss with autoprefixer and rtlcss
     pxt.debug("running postcss");
@@ -2067,11 +2094,14 @@ async function buildSemanticUIAsync(parsed?: commandParser.ParsedCommand) {
     const rtlcss = require("rtlcss");
     const files = [
         "semantic.css",
-        "blockly.css",
-        "react-common-skillmap.css",
-        "react-common-authcode.css",
-        "react-common-multiplayer.css"
+        "blockly.css"
     ];
+
+    for (const subapp of SUB_WEBAPPS) {
+        if (subapp.buildCss) {
+            files.push(`react-common-${subapp.name}.css`);
+        }
+    }
 
     for (const cssFile of files) {
         const css = await readFileAsync(`built/web/${cssFile}`, "utf8");
@@ -2088,10 +2118,12 @@ async function buildSemanticUIAsync(parsed?: commandParser.ParsedCommand) {
 
     if (!isPxtCore) {
         // This is just to support the local skillmap/cra-app serve for development
-        nodeutil.cp("built/web/react-common-skillmap.css", "node_modules/pxt-core/skillmap/public/blb");
-        nodeutil.cp("built/web/react-common-authcode.css", "node_modules/pxt-core/authcode/public/blb");
-        nodeutil.cp("built/web/semantic.css", "node_modules/pxt-core/skillmap/public/blb");
-        nodeutil.cp("built/web/semantic.css", "node_modules/pxt-core/authcode/public/blb");
+        for (const subapp of SUB_WEBAPPS) {
+            if (subapp.buildCss) {
+                nodeutil.cp(`built/web/react-common-${subapp.name}.css`, `node_modules/pxt-core/${subapp.name}/public/blb`);
+                nodeutil.cp(`built/web/semantic.css`, `node_modules/pxt-core/${subapp.name}/public/blb`);
+            }
+        }
     }
 }
 
@@ -2136,6 +2168,7 @@ function buildReactAppAsync(app: string, parsed: commandParser.ParsedCommand, op
             if (!opts.expandedPxtTarget) {
                 // read pxtarget.json, save into 'pxtTargetBundle' global variable
                 let cfg = readLocalPxTarget();
+                updateColorThemes(cfg);
                 nodeutil.writeFileSync(`${appRoot}/public/blb/target.js`, "// eslint-disable-next-line \n" + targetJsPrefix + JSON.stringify(cfg));
             } else {
                 nodeutil.cp("built/target.js", `${appRoot}/public/blb`);
@@ -2152,6 +2185,7 @@ function buildReactAppAsync(app: string, parsed: commandParser.ParsedCommand, op
 
             nodeutil.cp("targetconfig.json", `${appRoot}/public/blb`);
             nodeutil.cp("node_modules/pxt-core/built/pxtlib.js", `${appRoot}/public/blb`);
+            nodeutil.cp("node_modules/pxt-core/built/web/pxtrcdeps.js", `${appRoot}/public/blb`);
             if (opts.includePxtSim) {
                 nodeutil.cp("node_modules/pxt-core/built/pxtsim.js", `${appRoot}/public/blb`);
                 nodeutil.cp("node_modules/pxt-core/built/web/worker.js", `${appRoot}/public/blb`);
@@ -2265,6 +2299,75 @@ function updateTOC(cfg: pxt.TargetBundle) {
     }
 }
 
+function getThemeFilePaths() {
+    const sharedThemeFiles = fs.existsSync("node_modules/pxt-core/theme/color-themes")
+    ? nodeutil
+          .allFiles("node_modules/pxt-core/theme/color-themes", { maxDepth: 1, includeDirs: false })
+          .filter((f) => /\.json$/i.test(f))
+    : [];
+
+    const targetThemeFiles = fs.existsSync("theme/color-themes")
+        ? nodeutil
+            .allFiles("theme/color-themes", { maxDepth: 1, includeDirs: false })
+            .filter((f) => /\.json$/i.test(f))
+        : [];
+
+    // Target takes precedence, so include those at the end (will overwrite shared themes)
+    return sharedThemeFiles.concat(targetThemeFiles);
+}
+
+function updateColorThemes(cfg: pxt.TargetBundle) {
+    pxt.log("Loading color themes...");
+    const themeFiles = getThemeFilePaths();
+
+    for (const themeFile of themeFiles) {
+        const themeFileDir = path.dirname(themeFile);
+        const fileData = fs.readFileSync(themeFile, "utf8");
+        const themeData = JSON.parse(fileData);
+        const theme: pxt.ColorThemeInfo = {
+            id: themeData.id,
+            name: themeData.name,
+            weight: themeData.weight,
+            monacoBaseTheme: themeData.monacoBaseTheme,
+            colors: themeData.colors
+        };
+
+        for (const overrideFile of themeData.overrideFiles ?? []) {
+            if (!overrideFile) {
+                // Skip empty entries
+                continue;
+            }
+
+            // Strip leading slashes, convert \ to /, and lowercase the path
+            const combinedPath = path.join(themeFileDir, overrideFile);
+            let cssText = fs.readFileSync(combinedPath, "utf8");
+            theme.overrideCss = theme.overrideCss ? `${theme.overrideCss}\n${cssText}` : cssText;
+        }
+
+        if (!cfg.colorThemeMap) {
+            cfg.colorThemeMap = {};
+        }
+
+        if (cfg.colorThemeMap[theme.id]) {
+            // Only overwrite specified fields
+            // This allows target themes to be built off of shared base themes and only specify certain changes.
+            const existingTheme = cfg.colorThemeMap[theme.id];
+            cfg.colorThemeMap[theme.id] = {
+                ...existingTheme,
+                ...theme,
+                colors: {
+                    ...existingTheme.colors,
+                    ...theme.colors
+                }
+            };
+        } else {
+            cfg.colorThemeMap[theme.id] = theme;
+        }
+
+        pxt.log(`Loaded theme ${theme.id}`);
+    }
+}
+
 function rebundleAsync() {
     return buildTargetCoreAsync({ quick: true })
         .then(() => buildSimAsync());
@@ -2338,6 +2441,7 @@ async function buildTargetCoreAsync(options: BuildTargetOptions = {}) {
     let cfg = readLocalPxTarget()
     updateDefaultProjects(cfg);
     updateTOC(cfg);
+    updateColorThemes(cfg);
 
     cfg.bundledpkgs = {}
     pxt.setAppTarget(cfg);
@@ -2540,9 +2644,7 @@ async function buildTargetCoreAsync(options: BuildTargetOptions = {}) {
         tag: info.tag,
         commits: info.commitUrl,
         target: readJson("package.json")["version"],
-        pxt: pxtVersion(),
-        pxtCrowdinBranch: pxtCrowdinBranch(),
-        targetCrowdinBranch: targetCrowdinBranch()
+        pxt: pxtVersion()
     }
     saveThemeJson(cfg, options.localDir, options.packaged)
     fillInCompilerExtension(cfg);
@@ -2564,6 +2666,7 @@ async function buildTargetCoreAsync(options: BuildTargetOptions = {}) {
         delete targetlight.compile.compilerExtension;
     const targetlightjson = nodeutil.stringify(targetlight);
     nodeutil.writeFileSync("built/targetlight.json", targetlightjson)
+    nodeutil.writeFileSync("built/targetlight.js", targetJsPrefix + targetlightjson)
     nodeutil.writeFileSync("built/sim.webmanifest", nodeutil.stringify(webmanifest))
 
     console.log("target.json built.");
@@ -2609,18 +2712,6 @@ function pxtVersion(): string {
     return pxt.appTarget.id == "core" ?
         readJson("package.json")["version"] :
         readJson("node_modules/pxt-core/package.json")["version"];
-}
-
-function pxtCrowdinBranch(): string {
-    const theme = pxt.appTarget.id == "core" ?
-        readJson("pxtarget.json").appTheme :
-        readJson("node_modules/pxt-core/pxtarget.json").appTheme;
-    return theme ? theme.crowdinBranch : undefined;
-}
-
-function targetCrowdinBranch(): string {
-    const theme = readJson("pxtarget.json").appTheme;
-    return theme ? theme.crowdinBranch : undefined;
 }
 
 function buildAndWatchAsync(f: () => Promise<string[]>, maxDepth: number): Promise<void> {
@@ -2700,8 +2791,12 @@ async function buildAndWatchTargetAsync(includeSourceMaps: boolean, rebundle: bo
             skipFirstCssBuild = false;
         } else {
             console.log("rebuilding css");
-            await buildSemanticUIAsync();
-            console.log("css build complete");
+            try {
+                await buildSemanticUIAsync();
+                console.log("css build complete");
+            } catch (e) {
+                console.error("css build failed", e);
+            }
         }
         return lessFiles;
     };
@@ -2798,7 +2893,6 @@ function renderDocs(builtPackaged: string, localDir: string) {
     }
     pxt.log(`All docs written.`);
 }
-
 export function serveAsync(parsed: commandParser.ParsedCommand) {
     // always use a cloud build
     // in most cases, the user machine is not properly setup to
@@ -2856,6 +2950,8 @@ export function serveAsync(parsed: commandParser.ParsedCommand) {
             browser: parsed.flags["browser"] as string,
             serial: !parsed.flags["noSerial"] && !globalConfig.noSerial,
             noauth: parsed.flags["noauth"] as boolean || false,
+            backport: parsed.flags["backport"] as number || 0,
+            https: parsed.flags["https"] as boolean || false,
         }))
 }
 
@@ -3031,6 +3127,7 @@ class SnippetHost implements pxt.Host {
 class Host
     implements pxt.Host {
     fileOverrides: Map<string> = {}
+    queue = new pxt.Util.PromiseQueue();
 
     resolve(module: pxt.Package, filename: string) {
         //pxt.debug(`resolving ${module.level}:${module.id} -- ${filename} in ${path.resolve(".")}`)
@@ -3163,9 +3260,25 @@ class Host
         if (!forceLocalBuild && (extInfo.onlyPublic || forceCloudBuild))
             return pxt.hexloader.getHexInfoAsync(this, extInfo)
 
-        setBuildEngine()
-        return build.buildHexAsync(build.thisBuild, mainPkg, extInfo, forceBuild)
-            .then(() => build.thisBuild.patchHexInfo(extInfo))
+        if (useCompileServiceDocker) {
+            return build.compileWithLocalCompileService(extInfo);
+        }
+        return this.queue.enqueue("getHexInfoAsync", async () => {
+            const prevVariant = pxt.appTargetVariant;
+
+            if (extInfo.appVariant && extInfo.appVariant !== prevVariant) {
+                pxt.setAppTargetVariant(extInfo.appVariant, { temporary: true });
+            }
+            setBuildEngine()
+            await build.buildHexAsync(build.thisBuild, mainPkg, extInfo, forceBuild)
+            const res = build.thisBuild.patchHexInfo(extInfo);
+
+            if (extInfo.appVariant && extInfo.appVariant !== prevVariant) {
+                pxt.setAppTargetVariant(prevVariant);
+            }
+
+            return res;
+        });
     }
 
     cacheStoreAsync(id: string, val: string): Promise<void> {
@@ -4778,18 +4891,21 @@ async function buildDalDTSAsync(c: commandParser.ParsedCommand) {
 
     if (fs.existsSync("pxtarget.json")) {
         pxt.log(`generating dal.d.ts for packages`)
-        return rebundleAsync()
-            .then(() => forEachBundledPkgAsync((f, dir) => {
-                return f.loadAsync()
-                    .then(() => {
-                        if (f.config.dalDTS && f.config.dalDTS.corePackage) {
-                            console.log(`  ${dir}`)
-                            return prepAsync()
-                                .then(() => build.buildDalConst(build.thisBuild, f, true, true));
-                        }
-                        return Promise.resolve();
-                    })
-            }));
+        await rebundleAsync();
+        await forEachBundledPkgAsync(async (f, dir) => {
+            await f.loadAsync();
+            if (f.config.dalDTS && f.config.dalDTS.corePackage) {
+                console.log(`  ${dir}`)
+
+                if (f.config.dalDTS.compileServiceVariant) {
+                    pxt.setAppTargetVariant(f.config.dalDTS.compileServiceVariant);
+                    setBuildEngine();
+                }
+
+                await prepAsync();
+                build.buildDalConst(build.thisBuild, f, true, true);
+            }
+        })
     } else {
         ensurePkgDir()
         await mainPkg.loadAsync()
@@ -4930,7 +5046,7 @@ export async function staticpkgAsync(parsed: commandParser.ParsedCommand) {
         await internalGenDocsAsync(false, true);
         if (locsSrc) {
             const languages = pxt.appTarget?.appTheme?.availableLocales
-                .filter(langId => nodeutil.existsDirSync(path.join(locsSrc, langId)));
+                ?.filter(langId => nodeutil.existsDirSync(path.join(locsSrc, langId))) ?? [];
 
             await crowdin.buildAllTranslationsAsync(async (fileName: string) => {
                 const output: pxt.Map<pxt.Map<string>> = {};
@@ -5044,7 +5160,156 @@ interface AnimationInfo {
     name: string;
 }
 
+interface BlockStringValidationResult {
+    result: boolean;
+    message?: string;
+    original?: string;
+    validate?: string;
+}
+/**
+ * Checks for syntax errors in a single block string by comparing against a baseline string for the same block.
+ */
+function validateBlockString(original: string, toValidate: string): BlockStringValidationResult {
+    function getResponse(result: boolean, message?: string) {
+        return {
+            result,
+            message,
+            original,
+            validate: toValidate
+        };
+    }
 
+    // Check for empty strings. Both empty is fine. One empty and not the other, fail.
+    if (!original && !toValidate) {
+        return getResponse(true, "Empty strings");
+    } else if (!original || !toValidate) {
+        return getResponse(false, "Mis-match empty and non-empty strings.");
+    }
+
+    // Split block strings by the optional parameter separator "||" and parse each section separately.
+    const originalParts = original.split("||");
+    const toValidateParts = toValidate.split("||");
+    if (originalParts.length !== toValidateParts.length) {
+        return getResponse(false, "Block string has non-matching number of segments.");
+    }
+
+    for (let i = 0; i < originalParts.length; i++) {
+        const originalParsed = pxtc.parseBlockDefinition(originalParts[i]);
+        const toValidateParsed = pxtc.parseBlockDefinition(toValidateParts[i]);
+
+        // Check if parameter count changed
+        if (originalParsed.parameters?.length != toValidateParsed.parameters?.length) {
+            return getResponse(false, "Block string has non-matching number of parameters.");
+        }
+
+        // Check if anything has been translated when it should not have been.
+        for (let p = 0; p < toValidateParsed.parameters?.length; p++) {
+            // For ref ($) params, order does not matter. For non-ref (%) params, it does.
+            const toValidateParam = toValidateParsed.parameters[p];
+            let matchParam;
+            if (toValidateParam.ref) {
+                matchParam = originalParsed.parameters.find(op => op.ref && op.name === toValidateParam.name);
+                if (!matchParam) {
+                    return getResponse(false, "Block string has non-matching parameters.");
+                }
+            } else {
+                matchParam = originalParsed.parameters[p];
+                if (matchParam.ref || toValidateParam.name !== matchParam.name) {
+                    return getResponse(false, "Block string has non-matching ordered parameters.");
+                }
+            }
+
+            if (toValidateParam.shadowBlockId !== matchParam.shadowBlockId) {
+                return getResponse(false, "Block string has non-matching shadow block IDs.");
+            }
+        }
+    }
+
+    // Passed all checks
+    return getResponse(true);
+}
+
+/**
+ * Checks for syntax errors in a translated block strings file by comparing against a baseline.
+ * Optionally prints the results to console or sends to a file, if an output file is specified.
+ */
+export function validateTranslatedBlocks(parsed?: commandParser.ParsedCommand): Promise<void> {
+    const originalFilePath = parsed.args[0];
+    const translatedFilePath = parsed.args[1];
+    const outputFilePath = parsed.args[2]; // Optional
+
+    if (!originalFilePath || !translatedFilePath) {
+        U.userError("Missing required arguments: originalFilePath, translatedFilePath");
+    }
+    if (!fs.existsSync(originalFilePath)) {
+        U.userError(`File ${originalFilePath} not found`);
+    }
+    if (!fs.existsSync(translatedFilePath)) {
+        U.userError(`File ${translatedFilePath} not found`);
+    }
+
+    /**
+     * Takes a key string from a translations file and returns the type of content it refers to (a block, a category, etc...)
+     * Matches pxtc.gendocs key construction
+     */
+    function getKeyType(key: string): "category" | "subcategory" | "group" | "block" | "unknown" {
+        if (key.startsWith("{id:category}")) return "category";
+        if (key.startsWith("{id:subcategory}")) return "subcategory";
+        if (key.startsWith("{id:group}")) return "group";
+        if (key.endsWith("|block")) return "block";
+        return "unknown";
+    }
+
+    const originalMap = JSON.parse(fs.readFileSync(originalFilePath, 'utf8'));
+
+    const translationMap = JSON.parse(fs.readFileSync(translatedFilePath, 'utf8'));
+    const translationKeys = Object.keys(translationMap);
+
+    const results: { [translationKey: string]: BlockStringValidationResult} = {};
+    for (const translationKey of translationKeys) {
+        if (!(translationKey in originalMap)) {
+            results[translationKey] = { result: false, message: `Original string not found for key: ${translationKey}` };
+            continue;
+        }
+
+        const keyType = getKeyType(translationKey);
+        const translationString = translationMap[translationKey];
+        const originalString = originalMap[translationKey];
+        switch (keyType) {
+            case "block": {
+                const validation = validateBlockString(originalString, translationString);
+                results[translationKey] = validation;
+                break;
+            }
+            case "category":
+            case "subcategory":
+            case "group":
+            case "unknown":
+            default: {
+                results[translationKey] = {
+                    result: true,
+                    message: `No validation performed for key type: ${keyType}`,
+                    original: originalString,
+                    validate: translationString
+                };
+            }
+        }
+    }
+
+    if (outputFilePath) {
+        // Create directories for output file, if needed.
+        const outputDir = path.dirname(outputFilePath);
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+        }
+        fs.writeFileSync(outputFilePath, JSON.stringify(results, null, 2));
+        pxt.log(`Results written to ${outputFilePath}`);
+    } else {
+        pxt.log(JSON.stringify(results, null, 2));
+    }
+
+    return Promise.resolve();
+}
 
 export function buildJResSpritesAsync(parsed: commandParser.ParsedCommand) {
     ensurePkgDir()
@@ -6696,6 +6961,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             force: {
                 description: "skip cache lookup and force build",
                 aliases: ["f"]
@@ -6772,6 +7042,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             force: {
                 description: "skip cache lookup and force build",
                 aliases: ["f"]
@@ -6846,6 +7121,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             locs: {
                 description: "Download localization files and bundle them",
                 aliases: ["locales", "crowdin"]
@@ -6904,6 +7184,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             just: { description: "just serve without building" },
             rebundle: { description: "rebundle when change is detected", aliases: ["rb"] },
             hostname: {
@@ -6927,7 +7212,13 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
             noauth: {
                 description: "disable localtoken-based authentication",
                 aliases: ["na"],
-            }
+            },
+            backport: {
+                description: "port where the locally running backend is listening.",
+                argument: "backport",
+                type: "number",
+            },
+            https: { description: "use https protocol instead of http"}
         }
     }, serveAsync);
 
@@ -6972,6 +7263,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             force: {
                 description: "skip cache lookup and force build",
                 aliases: ["f"]
@@ -7000,6 +7296,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             force: {
                 description: "skip cache lookup and force build",
                 aliases: ["f"]
@@ -7017,7 +7318,7 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
         advanced: true,
     }, pc => uploadTargetRefsAsync(pc.args[0]));
     advancedCommand("uploadtt", "upload tagged release", uploadTaggedTargetAsync, "");
-    advancedCommand("downloadtrgtranslations", "download translations from bundled projects", crowdin.downloadTargetTranslationsAsync, "<package>");
+    advancedCommand("downloadtrgtranslations", "download translations from bundled projects", crowdin.downloadTargetTranslationsAsync, "[package]");
 
     p.defineCommand({
         name: "checkdocs",
@@ -7071,10 +7372,10 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
         name: "buildskillmap",
         aliases: ["skillmap"],
         advanced: true,
-        help: "Serves the skill map webapp",
+        help: "Serves the skillmap webapp",
         flags: {
             serve: {
-                description: "Serve the skill map locally after building (npm start)"
+                description: "Serve the skillmap locally after building (npm start)"
             },
             docs: {
                 description: "Path to local docs folder to copy into skillmap",
@@ -7103,7 +7404,18 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
 
     advancedCommand("augmentdocs", "test markdown docs replacements", augmnetDocsAsync, "<temlate.md> <doc.md>");
 
-    advancedCommand("crowdin", "upload, download, clean, stats files to/from crowdin", pc => crowdin.execCrowdinAsync.apply(undefined, pc.args), "<cmd> <path> [output]")
+    p.defineCommand({
+        name: "crowdin",
+        advanced: true,
+        argString: "<cmd> <path> [output]",
+        help: "upload, download, clean, stats files to/from crowdin",
+        flags: {
+            test: { description: "test run, do not upload files to crowdin" }
+        }
+    }, pc => {
+        if (pc.flags.test) pxt.crowdin.setTestMode();
+        return crowdin.execCrowdinAsync.apply(undefined, pc.args)
+    })
 
     advancedCommand("hidlist", "list HID devices", hid.listAsync)
     advancedCommand("hidserial", "run HID serial forwarding", hid.serialAsync, undefined, true);
@@ -7261,6 +7573,11 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 description: "Build native image using local toolchains",
                 aliases: ["local", "l", "local-build", "lb"]
             },
+            localcompileservice: {
+                description: "Build native image using docker",
+                hidden: true,
+                aliases: []
+            },
             clean: { description: "delete all previous repos" },
             fast: { description: "don't check tag" },
             filter: { description: "regex filter for the package name", type: "string", argument: "filter" }
@@ -7316,7 +7633,15 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
         help: "Validate and attempt to fix common pxt.json issues",
     }, validateAndFixPkgConfig);
 
-    advancedCommand("buildshims", "Regenerate shims.d.ts, enums.d.ts", buildShimsAsync)
+    advancedCommand("buildshims", "Regenerate shims.d.ts, enums.d.ts", buildShimsAsync);
+
+    p.defineCommand({
+        name: "validatetranslatedblocks",
+        aliases: ["vtb"],
+        help: "Validate a file of translated block strings against a baseline",
+        advanced: true,
+        argString: "<original-file> <translated-file> <output-file>"
+    }, validateTranslatedBlocks);
 
     function simpleCmd(name: string, help: string, callback: (c?: commandParser.ParsedCommand) => Promise<void>, argString?: string, onlineHelp?: boolean): void {
         p.defineCommand({ name, help, onlineHelp, argString }, callback);
@@ -7442,7 +7767,7 @@ export function mainCli(targetDir: string, args: string[] = process.argv.slice(2
 
     if (process.env["PXT_DEBUG"]) {
         pxt.options.debug = true;
-        pxt.debug = pxt.log;
+        pxt.setLogLevel(pxt.LogLevel.Debug);
     }
 
     if (process.env["PXT_ASMDEBUG"]) {

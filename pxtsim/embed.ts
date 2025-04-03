@@ -29,6 +29,7 @@ namespace pxsim {
         traceDisabled?: boolean;
         activePlayer?: 1 | 2 | 3 | 4 | undefined;
         theme?: string | pxt.Map<string>;
+        yieldDelay?: number;
     }
 
     export interface SimulatorInstructionsMessage extends SimulatorMessage {
@@ -83,6 +84,7 @@ namespace pxsim {
     export interface SimulatorBroadcastMessage extends SimulatorMessage {
         broadcast: boolean;
         toParentIFrameOnly?: boolean;
+        srcFrameIndex?: number;
     }
 
     export interface SimulatorControlMessage extends SimulatorBroadcastMessage {
@@ -114,7 +116,7 @@ namespace pxsim {
     }
     export interface SimulatorCommandMessage extends SimulatorMessage {
         type: "simulator",
-        command: "modal" | "restart" | "reload" | "setstate" | "focus" | "blur"
+        command: "modal" | "restart" | "reload" | "setstate" | "focus" | "blur" | "single"
         stateKey?: string;
         stateValue?: any;
         header?: string;
@@ -521,9 +523,9 @@ namespace pxsim {
 
             const serviceWorkerUrl = window.location.href.replace(/---simulator.*$/, "---simserviceworker");
             navigator.serviceWorker.register(serviceWorkerUrl).then(function (registration) {
-                console.log("Simulator ServiceWorker registration successful with scope: ", registration.scope);
+                pxsim.log("Simulator ServiceWorker registration successful with scope: ", registration.scope);
             }, function (err) {
-                console.log("Simulator ServiceWorker registration failed: ", err);
+                pxsim.log("Simulator ServiceWorker registration failed: ", err);
             });
         }
     }

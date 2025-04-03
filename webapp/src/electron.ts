@@ -1,13 +1,13 @@
-import Cloud = pxt.Cloud;
 import * as cmds from "./cmds";
 import * as core from "./core";
-import { ProjectView } from "./srceditor";
+
+import IProjectView = pxt.editor.IProjectView;
 
 const pxtElectron: pxt.electron.PxtElectron = (window as any).pxtElectron;
 
 const downloadingUpdateLoadingName = "pxtelectron-downloadingupdate";
 
-export function initElectron(projectView: ProjectView): void {
+export function initElectron(projectView: IProjectView): void {
     if (!pxt.BrowserUtils.isPxtElectron()) {
         return;
     }
@@ -33,6 +33,22 @@ export function initElectron(projectView: ProjectView): void {
             deployingDeferred.reject(err);
         }
     });
+
+    pxtElectron.onFileDeployResult((isSuccess) => {
+        if (!fileDeployDeferred) {
+            pxt.tickEvent("electron.filedeploy.unknowndeployoperation");
+            return;
+        }
+
+        if (isSuccess) {
+            pxt.tickEvent("electron.filedeploy.success");
+            fileDeployDeferred.resolve();
+        } else {
+            pxt.tickEvent("electron.filedeploy.failure");
+            const err = new Error("electron file deploy failed");
+            fileDeployDeferred.reject(err);
+        }
+    })
 
     const criticalUpdateFailedPromise = new Promise<void>((resolve) => {
         pxtElectron.onCriticalUpdateFailed(() => {
@@ -128,6 +144,23 @@ export function driveDeployAsync(compileResult: pxtc.CompileResult): Promise<voi
         .finally(() => {
             deployingDeferred = null;
         });
+}
+
+let fileDeployDeferred: pxt.Util.DeferredPromise<void> = null;
+export async function deployFilesAsync(deployRequest: pxt.electron.FileDeployRequest) {
+    if (!fileDeployDeferred) {
+        fileDeployDeferred = pxt.Util.defer<void>();
+        pxtElectron.sendFileDeploy(deployRequest);
+    } // else queue? see if needed.
+
+    try {
+        await fileDeployDeferred.promise
+    } catch (e) {
+        pxt.tickEvent("electron.filedeploy.failed");
+        throw e;
+    } finally {
+        fileDeployDeferred = null;
+    }
 }
 
 export function openDevTools(): void {

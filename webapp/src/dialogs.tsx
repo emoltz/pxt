@@ -7,6 +7,7 @@ import * as coretsx from "./coretsx";
 import * as pkg from "./package";
 import * as cloudsync from "./cloudsync";
 import * as workspace from "./workspace";
+import * as pxteditor from "../../pxteditor";
 
 import Cloud = pxt.Cloud;
 import Util = pxt.Util;
@@ -15,9 +16,12 @@ import { fireClickOnEnter } from "./util";
 import { pairAsync } from "./cmds";
 import { invalidate } from "./data";
 
+import IProjectView = pxt.editor.IProjectView;
+import ImportFileOptions = pxt.editor.ImportFileOptions;
+
 let dontShowDownloadFlag = false;
 
-export function showAboutDialogAsync(projectView: pxt.editor.IProjectView) {
+export function showAboutDialogAsync(projectView: IProjectView) {
     const compileService = pxt.appTarget.compileService;
     const githubUrl = pxt.appTarget.appTheme.githubUrl;
     const targetTheme = pxt.appTarget.appTheme;
@@ -604,7 +608,7 @@ export function showImportGithubDialogAsync() {
         }).then(() => res)
 }
 
-export function showImportFileDialogAsync(options?: pxt.editor.ImportFileOptions) {
+export function showImportFileDialogAsync(options?: ImportFileOptions) {
     let input: HTMLInputElement;
     let exts = [pxt.appTarget.compile.saveAsPNG ? ".png" : ".mkcd"];
     if (pxt.appTarget.compile.hasHex) {
@@ -786,7 +790,7 @@ export function renderBrowserDownloadInstructions(saveonly?: boolean, redeploy?:
                                                     </div>
                                                     <div className="thirteen wide column">
                                                         {lf("Download your code faster by pairing with WebUSB!")}
-                                                        <a className="ui button purple" onClick={onPairClicked}>{lf("Pair Now")}</a>
+                                                        <sui.Button className="ui button purple" onClick={onPairClicked} text={lf("Pair Now")} />
                                                     </div>
                                                 </div>
                                             </div>
@@ -861,10 +865,18 @@ export function isDontShowDownloadDialogFlagSet() {
 
 export async function showTurnBackTimeDialogAsync(header: pxt.workspace.Header, reloadHeader: () => void) {
     const text = await workspace.getTextAsync(header.id, true);
-    let history: pxt.workspace.HistoryFile;
+    let history: pxteditor.history.HistoryFile;
 
     if (text?.[pxt.HISTORY_FILE]) {
-        history = pxt.workspace.parseHistoryFile(text[pxt.HISTORY_FILE]);
+        history = pxteditor.history.parseHistoryFile(text[pxt.HISTORY_FILE]);
+    }
+    else {
+        history = {
+            entries: [],
+            snapshots: [],
+            shares: [],
+            lastSaveTime: Date.now()
+        };
     }
 
     const loadProject = async (text: pxt.workspace.ScriptText, editorVersion: string) => {
@@ -886,14 +898,14 @@ export async function showTurnBackTimeDialogAsync(header: pxt.workspace.Header, 
             newHistory = {
                 entries:  history.entries.slice(0, history.entries.findIndex(e => e.timestamp === timestamp)),
                 snapshots: history.snapshots.filter(s => s.timestamp <= timestamp),
-                shares: history.shares.filter(s => s.timestamp <= timestamp)
+                shares: history.shares.filter(s => s.timestamp <= timestamp),
+                lastSaveTime: timestamp
             }
         }
 
-        if (text[pxt.HISTORY_FILE]) {
-            text[pxt.HISTORY_FILE] = JSON.stringify(newHistory);
-        }
-        const date = new Date(timestamp);
+        text[pxt.HISTORY_FILE] = JSON.stringify(newHistory);
+
+        const date = timestamp ? new Date(timestamp) : new Date();
 
         const dateString = date.toLocaleDateString(
             pxt.U.userLanguage(),

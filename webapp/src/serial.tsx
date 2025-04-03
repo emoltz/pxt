@@ -11,6 +11,9 @@ import Util = pxt.Util
 import { fireClickOnEnter } from "./util"
 import { classList } from "../../react-common/components/util"
 
+import IProjectView = pxt.editor.IProjectView;
+import IResourceImporter = pxt.editor.IResourceImporter;
+
 const maxEntriesPerChart: number = 4000;
 
 export class Editor extends srceditor.Editor {
@@ -136,7 +139,7 @@ export class Editor extends srceditor.Editor {
         return (!this.isSim || this.parent.isSimulatorRunning());
     }
 
-    constructor(public parent: pxt.editor.IProjectView) {
+    constructor(public parent: IProjectView) {
         super(parent)
         window.addEventListener("message", this.processEvent.bind(this), false)
         const serialTheme = pxt.appTarget.serial && pxt.appTarget.serial.editorTheme;
@@ -688,7 +691,7 @@ export class Editor extends srceditor.Editor {
                 <div id="serialHeader" className="ui serialHeader">
                     <div className="leftHeaderWrapper">
                         <div className="leftHeader">
-                            <sui.Button title={lf("Go back")} tabIndex={0} onClick={this.goBack} onKeyDown={fireClickOnEnter}>
+                            <sui.Button title={lf("Go back")} tabIndex={0} onClick={this.goBack} onKeyDown={fireClickOnEnter} className="neutral">
                                 <sui.Icon icon="arrow left" />
                                 <span className="ui text landscape only">{lf("Go back")}</span>
                             </sui.Button>
@@ -696,7 +699,7 @@ export class Editor extends srceditor.Editor {
                         </div>
                     </div>
                     <div className="rightHeader">
-                        <sui.Button title={lf("Save raw text")} className="ui icon button editorExport csv-hide" ariaLabel={lf("Save raw text")} onClick={this.downloadRawText}>
+                        <sui.Button title={lf("Save raw text")} className="ui icon neutral button editorExport csv-hide" ariaLabel={lf("Save raw text")} onClick={this.downloadRawText}>
                             <sui.Icon icon="copy" />
                         </sui.Button>
                         <sui.Button title={lf("Export data")} className="ui icon blue button editorExport" ariaLabel={lf("Export data")} onClick={this.downloadConsoleCSV}>
@@ -767,11 +770,20 @@ class Chart {
     constructor(source: string, variable: string, chartIdx: number, lineColors: string[]) {
         // Initialize chart
         const serialTheme = pxt.appTarget.serial && pxt.appTarget.serial.editorTheme;
+
+        // TODO : Integrate serialTheme & App Color Themes properly.
+        serialTheme.lineColors = [
+            "var(--pxt-colors-blue-background)",
+            "var(--pxt-colors-red-background)",
+            "var(--pxt-colors-green-background)",
+            "var(--pxt-colors-purple-background)",
+            "var(--pxt-colors-orange-background)"
+        ];
         const chartConfig: Smoothie.IChartOptions = {
             interpolation: 'bezier',
             labels: {
                 disabled: false,
-                fillStyle: 'black',
+                fillStyle: 'var(--pxt-target-foreground2)',
                 fontSize: 14
             },
             responsive: true,
@@ -781,7 +793,7 @@ class Chart {
                 borderVisible: false,
                 millisPerLine: 5000,
                 fillStyle: serialTheme && serialTheme.gridFillStyle || 'transparent',
-                strokeStyle: serialTheme && serialTheme.gridStrokeStyle || '#fff'
+                strokeStyle: 'var(--pxt-target-background2)'
             },
             tooltip: true,
             tooltipFormatter: (ts, data) => this.tooltip(ts, data)
@@ -877,7 +889,7 @@ class Chart {
     }
 }
 
-export class ResourceImporter implements pxt.editor.IResourceImporter {
+export class ResourceImporter implements IResourceImporter {
     public id: "console";
     public canImport(data: File): boolean {
         return data.type == "text/plain";
